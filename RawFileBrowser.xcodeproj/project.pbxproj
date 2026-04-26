@@ -1,0 +1,298 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		AA000001 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = DD000001 /* Assets.xcassets */; };
+		BB09B4A0ECBFB4 /* AnalysisRegionOverlay.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA09B4A0ECBFB4 /* AnalysisRegionOverlay.swift */; };
+		BB1BBD9BF8B221 /* SDCardPromptView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA1BBD9BF8B221 /* SDCardPromptView.swift */; };
+		BB1E5FE5967486 /* CanonMakernoteParser.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA1E5FE5967486 /* CanonMakernoteParser.swift */; };
+		BB2450D44CBB18 /* RAWImageLoader.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA2450D44CBB18 /* RAWImageLoader.swift */; };
+		BB24FE095785F8 /* YOLODetector.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA24FE095785F8 /* YOLODetector.swift */; };
+		BB2984DC46EF47 /* RAWFileBrowserApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA2984DC46EF47 /* RAWFileBrowserApp.swift */; };
+		BB36639D4BC5F4 /* XMPSidecarWriter.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA36639D4BC5F4 /* XMPSidecarWriter.swift */; };
+		BB63D73C64251D /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA63D73C64251D /* ContentView.swift */; };
+		BB6472334FC2A6 /* RAWFileThumbnailCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA6472334FC2A6 /* RAWFileThumbnailCard.swift */; };
+		BB6CBBAE1EB7B0 /* DocumentPickerHelper.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA6CBBAE1EB7B0 /* DocumentPickerHelper.swift */; };
+		BB90D4BA9F4A68 /* CanonMakernoteDiagnostic.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA90D4BA9F4A68 /* CanonMakernoteDiagnostic.swift */; };
+		BBA165744D57E5 /* RAWFileGridView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AAA165744D57E5 /* RAWFileGridView.swift */; };
+		BBB4FB1680BD00 /* FocusAnalyzer.swift in Sources */ = {isa = PBXBuildFile; fileRef = AAB4FB1680BD00 /* FocusAnalyzer.swift */; };
+		BBCE0842184D6A /* RAWFileDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AACE0842184D6A /* RAWFileDetailView.swift */; };
+		BBEC80F9FA071D /* SDCardManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = AAEC80F9FA071D /* SDCardManager.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		AA09B4A0ECBFB4 /* AnalysisRegionOverlay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnalysisRegionOverlay.swift; sourceTree = "<group>"; };
+		AA1BBD9BF8B221 /* SDCardPromptView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SDCardPromptView.swift; sourceTree = "<group>"; };
+		AA1E5FE5967486 /* CanonMakernoteParser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CanonMakernoteParser.swift; sourceTree = "<group>"; };
+		AA2450D44CBB18 /* RAWImageLoader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RAWImageLoader.swift; sourceTree = "<group>"; };
+		AA24FE095785F8 /* YOLODetector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = YOLODetector.swift; sourceTree = "<group>"; };
+		AA2984DC46EF47 /* RAWFileBrowserApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RAWFileBrowserApp.swift; sourceTree = "<group>"; };
+		AA36639D4BC5F4 /* XMPSidecarWriter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = XMPSidecarWriter.swift; sourceTree = "<group>"; };
+		AA63D73C64251D /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+		AA6472334FC2A6 /* RAWFileThumbnailCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RAWFileThumbnailCard.swift; sourceTree = "<group>"; };
+		AA6CBBAE1EB7B0 /* DocumentPickerHelper.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DocumentPickerHelper.swift; sourceTree = "<group>"; };
+		AA90D4BA9F4A68 /* CanonMakernoteDiagnostic.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CanonMakernoteDiagnostic.swift; sourceTree = "<group>"; };
+		AAA165744D57E5 /* RAWFileGridView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RAWFileGridView.swift; sourceTree = "<group>"; };
+		AAB4FB1680BD00 /* FocusAnalyzer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FocusAnalyzer.swift; sourceTree = "<group>"; };
+		AACE0842184D6A /* RAWFileDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RAWFileDetailView.swift; sourceTree = "<group>"; };
+		AAEC80F9FA071D /* SDCardManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SDCardManager.swift; sourceTree = "<group>"; };
+		DD000001 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		DD000002 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		EE000001 /* RawFileBrowser.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = RawFileBrowser.app; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		FF000001 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		FF000010 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				EE000001 /* RawFileBrowser.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		FF000011 /* RawFileBrowser */ = {
+			isa = PBXGroup;
+			children = (
+				DD000001 /* Assets.xcassets */,
+				DD000002 /* Info.plist */,
+				AA09B4A0ECBFB4 /* AnalysisRegionOverlay.swift */,
+				AA90D4BA9F4A68 /* CanonMakernoteDiagnostic.swift */,
+				AA1E5FE5967486 /* CanonMakernoteParser.swift */,
+				AA63D73C64251D /* ContentView.swift */,
+				AA6CBBAE1EB7B0 /* DocumentPickerHelper.swift */,
+				AAB4FB1680BD00 /* FocusAnalyzer.swift */,
+				AA2984DC46EF47 /* RAWFileBrowserApp.swift */,
+				AACE0842184D6A /* RAWFileDetailView.swift */,
+				AAA165744D57E5 /* RAWFileGridView.swift */,
+				AA6472334FC2A6 /* RAWFileThumbnailCard.swift */,
+				AA2450D44CBB18 /* RAWImageLoader.swift */,
+				AAEC80F9FA071D /* SDCardManager.swift */,
+				AA1BBD9BF8B221 /* SDCardPromptView.swift */,
+				AA36639D4BC5F4 /* XMPSidecarWriter.swift */,
+				AA24FE095785F8 /* YOLODetector.swift */,
+			);
+			path = RawFileBrowser;
+			sourceTree = "<group>";
+		};
+		FF000012 = {
+			isa = PBXGroup;
+			children = (
+				FF000011 /* RawFileBrowser */,
+				FF000010 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		FF000020 /* RawFileBrowser */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = FF000030 /* Build configuration list for PBXNativeTarget "RawFileBrowser" */;
+			buildPhases = (
+				FF000021 /* Sources */,
+				FF000001 /* Frameworks */,
+				FF000022 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = RawFileBrowser;
+			productName = RawFileBrowser;
+			productReference = EE000001 /* RawFileBrowser.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		FF000040 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 1530;
+				LastUpgradeCheck = 1530;
+				TargetAttributes = {
+					FF000020 = {
+						CreatedOnToolsVersion = 15.3;
+					};
+				};
+			};
+			buildConfigurationList = FF000041 /* Build configuration list for PBXProject "RawFileBrowser" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = FF000012;
+			productRefGroup = FF000010 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				FF000020 /* RawFileBrowser */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		FF000022 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				AA000001 /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		FF000021 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				BB09B4A0ECBFB4 /* AnalysisRegionOverlay.swift in Sources */,
+				BB90D4BA9F4A68 /* CanonMakernoteDiagnostic.swift in Sources */,
+				BB1E5FE5967486 /* CanonMakernoteParser.swift in Sources */,
+				BB63D73C64251D /* ContentView.swift in Sources */,
+				BB6CBBAE1EB7B0 /* DocumentPickerHelper.swift in Sources */,
+				BBB4FB1680BD00 /* FocusAnalyzer.swift in Sources */,
+				BB2984DC46EF47 /* RAWFileBrowserApp.swift in Sources */,
+				BBCE0842184D6A /* RAWFileDetailView.swift in Sources */,
+				BBA165744D57E5 /* RAWFileGridView.swift in Sources */,
+				BB6472334FC2A6 /* RAWFileThumbnailCard.swift in Sources */,
+				BB2450D44CBB18 /* RAWImageLoader.swift in Sources */,
+				BBEC80F9FA071D /* SDCardManager.swift in Sources */,
+				BB1BBD9BF8B221 /* SDCardPromptView.swift in Sources */,
+				BB36639D4BC5F4 /* XMPSidecarWriter.swift in Sources */,
+				BB24FE095785F8 /* YOLODetector.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		FF000031 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 3JM8J6R653;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = RawFileBrowser/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.davidrichards.rawfilebrowser;
+				PRODUCT_NAME = RawFileBrowser;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		FF000032 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 3JM8J6R653;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = RawFileBrowser/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.davidrichards.rawfilebrowser;
+				PRODUCT_NAME = RawFileBrowser;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		FF000033 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_TESTABILITY = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		FF000034 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		FF000030 /* Build configuration list for PBXNativeTarget "RawFileBrowser" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				FF000031 /* Debug */,
+				FF000032 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		FF000041 /* Build configuration list for PBXProject "RawFileBrowser" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				FF000033 /* Debug */,
+				FF000034 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = FF000040 /* Project object */;
+}
