@@ -339,10 +339,6 @@ struct RAWFileDetailView: View {
         isLoading = true
         let url   = file.url
 
-        // Diagnostic — remove once AF points are confirmed working
-        await Task.detached(priority: .background) {
-            CanonMakernoteDiagnostic.dump(url: url)
-        }.value
 
         // Extract Canon AF points via Makernote parser
         let extractedPoints: [CanonAFPoint] = await Task.detached(priority: .userInitiated) {

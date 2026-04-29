@@ -18,7 +18,6 @@
 		BB63D73C64251D /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA63D73C64251D /* ContentView.swift */; };
 		BB6472334FC2A6 /* RAWFileThumbnailCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA6472334FC2A6 /* RAWFileThumbnailCard.swift */; };
 		BB6CBBAE1EB7B0 /* DocumentPickerHelper.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA6CBBAE1EB7B0 /* DocumentPickerHelper.swift */; };
-		BB90D4BA9F4A68 /* CanonMakernoteDiagnostic.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA90D4BA9F4A68 /* CanonMakernoteDiagnostic.swift */; };
 		BBA165744D57E5 /* RAWFileGridView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AAA165744D57E5 /* RAWFileGridView.swift */; };
 		BBB4FB1680BD00 /* FocusAnalyzer.swift in Sources */ = {isa = PBXBuildFile; fileRef = AAB4FB1680BD00 /* FocusAnalyzer.swift */; };
 		BBCE0842184D6A /* RAWFileDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AACE0842184D6A /* RAWFileDetailView.swift */; };
@@ -36,7 +35,6 @@
 		AA63D73C64251D /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		AA6472334FC2A6 /* RAWFileThumbnailCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RAWFileThumbnailCard.swift; sourceTree = "<group>"; };
 		AA6CBBAE1EB7B0 /* DocumentPickerHelper.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DocumentPickerHelper.swift; sourceTree = "<group>"; };
-		AA90D4BA9F4A68 /* CanonMakernoteDiagnostic.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CanonMakernoteDiagnostic.swift; sourceTree = "<group>"; };
 		AAA165744D57E5 /* RAWFileGridView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RAWFileGridView.swift; sourceTree = "<group>"; };
 		AAB4FB1680BD00 /* FocusAnalyzer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FocusAnalyzer.swift; sourceTree = "<group>"; };
 		AACE0842184D6A /* RAWFileDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RAWFileDetailView.swift; sourceTree = "<group>"; };
@@ -71,7 +69,6 @@
 				DD000001 /* Assets.xcassets */,
 				DD000002 /* Info.plist */,
 				AA09B4A0ECBFB4 /* AnalysisRegionOverlay.swift */,
-				AA90D4BA9F4A68 /* CanonMakernoteDiagnostic.swift */,
 				AA1E5FE5967486 /* CanonMakernoteParser.swift */,
 				AA63D73C64251D /* ContentView.swift */,
 				AA6CBBAE1EB7B0 /* DocumentPickerHelper.swift */,
@@ -167,7 +164,6 @@
 			buildActionMask = 2147483647;
 			files = (
 				BB09B4A0ECBFB4 /* AnalysisRegionOverlay.swift in Sources */,
-				BB90D4BA9F4A68 /* CanonMakernoteDiagnostic.swift in Sources */,
 				BB1E5FE5967486 /* CanonMakernoteParser.swift in Sources */,
 				BB63D73C64251D /* ContentView.swift in Sources */,
 				BB6CBBAE1EB7B0 /* DocumentPickerHelper.swift in Sources */,
