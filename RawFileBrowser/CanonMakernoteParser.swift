@@ -5,7 +5,19 @@ import ImageIO
 
 struct CanonAFPoint {
     let normRect: CGRect
+
+    /// True when the camera confirmed focus lock on this point (AFPointsInFocus bitmask).
     let isInFocus: Bool
+
+    /// True when the camera was actively tracking this point (AFPointsSelected bitmask).
+    /// On Animal Eye AF shots the R7 sets this flag but NOT isInFocus — this is the
+    /// correct indicator when using subject/eye tracking modes.
+    let isSelected: Bool
+
+    /// True when this point came from tag 0x4013 (R-series mirrorless, precise ~163px box).
+    /// False when it came from tag 0x0026 (legacy DSLR fallback, coarse ~348px zone).
+    /// The overlay draws dashed brackets for imprecise fallback points.
+    let isPrecise: Bool
 }
 
 // MARK: - Canon CR3 AF Parser
@@ -17,41 +29,55 @@ struct CanonAFPoint {
 //   AF Area Widths  = 163 0 0 0 ...   (only first ValidAFPoints entries are non-zero)
 //   AF Area Heights = 163 0 0 0 ...
 //   AF Area X Positions = -121 0 0 0 ... (centre-relative, pixels)
-//   AF Area Y Positions =  405 0 0 0 ... (centre-relative, Y down)
+//   AF Area Y Positions =  405 0 0 0 ... (centre-relative)
 //   AF Points In Focus  = 0             (bitmask: bit 0 set = point 0 in focus)
 //   AF Points Selected  = 0             (bitmask: bit 0 set = point 0 selected)
 //   Valid AF Points     = 1             (how many entries in arrays are real)
 //
-// Coordinate conversion:
-//   normX = 0.5 + x / AFImageWidth
-//   normY = 0.5 + y / AFImageHeight
-//
 // The CMT3 box inside the CR3 ISOBMFF container holds the Canon Makernote TIFF IFD.
-// Apple's ImageIO parses only 6 cosmetic fields; we must read CMT3 directly from
-// the raw file bytes.
+// Apple's ImageIO parses only 6 cosmetic fields; we must read CMT3 directly.
 //
-// CMT3 tag for R-series AF data: 0x4013 (AFInfo, int16s array)
-// Header layout (int16s):
-//   [0] NumAFPoints
-//   [1] ValidAFPoints
-//   [2] CanonImageWidth   (full image width)
-//   [3] CanonImageHeight
-//   [4] AFImageWidth      (AF coordinate space — equals sensor for R7)
-//   [5] AFImageHeight
-//   [6..6+N-1]             AFAreaWidths
-//   [6+N..6+2N-1]          AFAreaHeights
-//   [6+2N..6+3N-1]         AFAreaXPositions (centre-relative)
-//   [6+3N..6+4N-1]         AFAreaYPositions (centre-relative)
-//   then bitmask words:    AFPointsInFocus  (16 points per uint16)
-//   then bitmask words:    AFPointsSelected (16 points per uint16)
+// ── Y-AXIS CONVENTIONS ─────────────────────────────────────────────────────────
+//
+//   Tag 0x4013 (R-series mirrorless):
+//     Y axis increases DOWNWARD from centre — matches UIKit/SwiftUI screen coords.
+//     normCY = 0.5 + y / afImageH
+//     Confirmed: y=405 (positive) → below centre → normCY > 0.5 ✓
+//
+//   Tag 0x0026 (legacy DSLR AFInfo2):
+//     Y axis increases UPWARD from centre — mathematical convention, opposite to screen.
+//     normCY = 0.5 - y / afImageH   ← sign is NEGATED
+//     Confirmed via DPP: y=404 (positive) → above centre → normCY < 0.5 ✓
+//
+// ── TAG PRIORITY ───────────────────────────────────────────────────────────────
+//
+//   The R7 writes BOTH tags into every file:
+//     0x4013 — Precise mirrorless point (~163px). Preferred.
+//               On shots where Animal Eye AF found no subject, written as a stub
+//               (11 int16 values, afW=0, afH=0). Parser detects and skips stub.
+//     0x0026 — Coarse legacy zone (~348px). Used as fallback only.
+//   IFD entries are NOT tag-sorted — always do two passes to guarantee priority.
+//
+// ── BITMASK BEHAVIOUR ──────────────────────────────────────────────────────────
+//
+//   Animal Eye AF / subject tracking: R7 sets AFPointsSelected but NOT
+//   AFPointsInFocus. Both must be read. Display priority:
+//     1. inFocus  → green  (confirmed focus lock)
+//     2. selected → yellow (eye/subject tracking)
+//     3. fallback → white  (valid point, neither bitmask set)
+//
+// ── HEADER LAYOUT (int16s) ─────────────────────────────────────────────────────
+//
+//   Standard: [0]=NumAFPoints [1]=ValidAFPoints [2]=ImgW [3]=ImgH
+//             [4]=AFImageW [5]=AFImageH  then coordinate arrays...
+//   R7 adds two prefix words:
+//             [0]=AFInfoSize [1]=unknown  (remaining fields at +2 offset)
 
 enum CanonMakernoteParser {
 
     // MARK: - Public API
 
     static func extractAFPoints(from url: URL) -> [CanonAFPoint]? {
-        // Read first 2MB — covers CMT3 which sits in the moov box near file start.
-        // R7 files are typically 25-40MB; CMT3 is always within the first 1MB.
         guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
         defer { handle.closeFile() }
         let readSize = min(2 * 1024 * 1024, Int((try? handle.seekToEndOfFile()) ?? 0))
@@ -63,20 +89,20 @@ enum CanonMakernoteParser {
         if let cmt3 = findCMT3(in: bytes) {
             print("CanonParser: Found CMT3 (\(cmt3.count) bytes)")
             if let points = parseCanonTIFF(cmt3) {
-                print("CanonParser: \(points.count) AF point(s), \(points.filter(\.isInFocus).count) in focus")
+                let nFocus    = points.filter(\.isInFocus).count
+                let nSelected = points.filter(\.isSelected).count
+                let precise   = points.first?.isPrecise == true
+                print("CanonParser: \(points.count) point(s) — inFocus=\(nFocus) selected=\(nSelected) precise=\(precise)")
                 return points
             }
             print("CanonParser: parseCanonTIFF returned nil")
         } else {
-            print("CanonParser: CMT3 not found in first 256KB")
+            print("CanonParser: CMT3 not found in first 2MB")
         }
         return nil
     }
 
     // MARK: - ISOBMFF box search
-    // CMT3 sits directly inside the moov box (or inside a uuid wrapper inside moov).
-    // We scan linearly for the ASCII bytes "CMT3" rather than walking the full tree,
-    // which is simpler and reliable since CMT3 is always in the first 256KB.
 
     private static func findCMT3(in bytes: [UInt8]) -> [UInt8]? {
         let target: [UInt8] = [0x43, 0x4D, 0x54, 0x33] // "CMT3"
@@ -88,15 +114,10 @@ enum CanonMakernoteParser {
                   bytes[i+2] == target[2],
                   bytes[i+3] == target[3] else { continue }
 
-            // Found "CMT3" at position i.
-            // The box size is the 4 bytes BEFORE the name (big-endian uint32).
             let sizeOffset = i - 4
-            let boxSize = Int(readU32BE(bytes, at: sizeOffset))
+            let boxSize    = Int(readU32BE(bytes, at: sizeOffset))
+            guard boxSize >= 8, sizeOffset + boxSize <= bytes.count else { continue }
 
-            guard boxSize >= 8,
-                  sizeOffset + boxSize <= bytes.count else { continue }
-
-            // Payload starts after the 8-byte header (size + name)
             let payloadStart = i + 4
             let payloadEnd   = sizeOffset + boxSize
             guard payloadEnd > payloadStart else { continue }
@@ -125,90 +146,113 @@ enum CanonMakernoteParser {
 
         print("CanonParser: TIFF IFD has \(entryCount) entries")
 
-        for i in 0..<entryCount {
-            let e = ifd0 + 2 + i * 12
-            guard e + 12 <= bytes.count else { break }
+        // Two-pass scan: prefer 0x4013 (precise mirrorless) over 0x0026 (coarse legacy).
+        // IFD entries are not tag-sorted, so we cannot stop at first match.
+        func extractPayload(forTag tag: UInt16) -> (payload: [UInt8], count: Int)? {
+            for i in 0..<entryCount {
+                let e = ifd0 + 2 + i * 12
+                guard e + 12 <= bytes.count else { break }
+                guard readU16(bytes, at: e, le: le) == tag else { continue }
 
-            let tagID = readU16(bytes, at: e, le: le)
+                let count      = Int(readU32(bytes, at: e + 4, le: le))
+                let valOrOff   = Int(readU32(bytes, at: e + 8, le: le))
+                let totalBytes = count * 2
+                let dataStart  = totalBytes > 4 ? valOrOff : e + 8
+                guard dataStart >= 0, dataStart + totalBytes <= bytes.count else { continue }
 
-            // Tag 0x4013 = AFInfo (R-series mirrorless: R7, R5, R6, R3, R50, R10 etc.)
-            // Tag 0x0026 = AFInfo2 (older EOS DSLR models)
-            guard tagID == 0x4013 || tagID == 0x0026 || tagID == 0x0025 else { continue }
-
-            print("CanonParser: Found AF tag 0x\(String(format: "%04X", tagID)) at IFD entry \(i)")
-
-            let count    = Int(readU32(bytes, at: e + 4, le: le))
-            let valOrOff = Int(readU32(bytes, at: e + 8, le: le))
-            // type 3 = SHORT (2 bytes), type 8 = SSHORT (2 bytes signed)
-            let totalBytes = count * 2
-            let dataStart  = totalBytes > 4 ? valOrOff : e + 8
-
-            guard dataStart >= 0,
-                  dataStart + totalBytes <= bytes.count else { continue }
-
-            let payload = Array(bytes[dataStart..<(dataStart + totalBytes)])
-            print("CanonParser: AF payload \(count) int16 values, \(payload.count) bytes")
-
-            return parseAFPayload(payload, count: count, le: le)
+                print("CanonParser: Found tag 0x\(String(format: "%04X", tag)) at entry \(i) (\(count) int16 values)")
+                return (Array(bytes[dataStart..<(dataStart + totalBytes)]), count)
+            }
+            return nil
         }
+
+        // Pass 1 — precise R-series mirrorless tag, Y axis increases downward
+        if let (payload, count) = extractPayload(forTag: 0x4013) {
+            if let points = parseAFPayload(payload, count: count, le: le,
+                                           isPrecise: true, yAxisDownward: true) {
+                print("CanonParser: Using 0x4013 (precise mirrorless, Y-down)")
+                return points
+            }
+            // afW=0/afH=0 stub — Animal Eye AF found no subject
+            print("CanonParser: 0x4013 is a stub — falling back to legacy tag")
+        }
+
+        // Pass 2 — coarse legacy DSLR tag, Y axis increases upward (mathematical convention)
+        for legacyTag: UInt16 in [0x0026, 0x0025] {
+            if let (payload, count) = extractPayload(forTag: legacyTag) {
+                if let points = parseAFPayload(payload, count: count, le: le,
+                                               isPrecise: false, yAxisDownward: false) {
+                    print("CanonParser: Using 0x\(String(format: "%04X", legacyTag)) (imprecise DSLR zone, Y-up)")
+                    return points
+                }
+            }
+        }
+
         return nil
     }
 
     // MARK: - AF payload parser
 
+    /// - Parameter yAxisDownward: true for tag 0x4013 (Y increases down, matches screen).
+    ///                            false for tag 0x0026 (Y increases up, must be negated).
     private static func parseAFPayload(_ bytes: [UInt8],
-                                        count: Int,
-                                        le: Bool) -> [CanonAFPoint]? {
+                                       count: Int,
+                                       le: Bool,
+                                       isPrecise: Bool,
+                                       yAxisDownward: Bool) -> [CanonAFPoint]? {
         guard count >= 6 else { return nil }
 
         func s16(_ index: Int) -> Int {
             guard index * 2 + 1 < bytes.count else { return 0 }
-            let raw = readU16(bytes, at: index * 2, le: le)
-            return Int(Int16(bitPattern: raw))
+            return Int(Int16(bitPattern: readU16(bytes, at: index * 2, le: le)))
         }
 
-        // R7 layout: [0]=AFInfoSize [1]=unknown [2]=NumAFPoints [3]=ValidAFPoints
-        //             [4]=ImgW [5]=ImgH [6]=AFImageW [7]=AFImageH
-        // Standard:   [0]=NumAFPoints [1]=ValidAFPoints [2]=ImgW [3]=ImgH [4]=AFImageW [5]=AFImageH
-        let val0 = s16(0)
-        let val2 = s16(2)
-        let val3 = s16(3)
+        // Detect R7/R5/R6mkII layout: two prefix words before NumAFPoints.
+        // val[0] > 1000 means it is a byte-count, not a point count.
+        let val0 = s16(0), val2 = s16(2), val3 = s16(3)
         let isR7Layout = val0 > 1000 && val2 > 0 && val2 < 1000 && val3 >= 0 && val3 <= val2
         let offset = isR7Layout ? 2 : 0
 
-        let numAFPoints  = s16(offset + 0)
-        let validPoints  = s16(offset + 1)
-        let afImageW     = CGFloat(s16(offset + 4))
-        let afImageH     = CGFloat(s16(offset + 5))
+        let numAFPoints = s16(offset + 0)
+        let validPoints = s16(offset + 1)
+        let afImageW    = CGFloat(s16(offset + 4))
+        let afImageH    = CGFloat(s16(offset + 5))
 
-        print("CanonParser: offset=\(offset) numAFPoints=\(numAFPoints) valid=\(validPoints) afW=\(afImageW) afH=\(afImageH)")
+        print("CanonParser: offset=\(offset) numAFPoints=\(numAFPoints) valid=\(validPoints) afW=\(afImageW) afH=\(afImageH) yDown=\(yAxisDownward)")
 
+        // Reject stubs (afW=0/afH=0 means no valid AF data)
         guard numAFPoints > 0, numAFPoints <= 1024,
               afImageW > 0, afImageH > 0 else { return nil }
 
-        // Only process the number of valid points — rest are zeroed padding
-        let n = max(1, validPoints)
-
+        let n     = max(1, validPoints)
         let wBase = offset + 6
         let hBase = wBase + numAFPoints
         let xBase = hBase + numAFPoints
         let yBase = xBase + numAFPoints
 
-        // In-focus bitmask — one bit per AF point, packed into uint16 words
-        let bitmaskBase  = yBase + numAFPoints
+        // Read both bitmasks (AFPointsInFocus then AFPointsSelected).
+        // Animal Eye AF sets AFPointsSelected but not AFPointsInFocus.
         let wordsNeeded  = (numAFPoints + 15) / 16
-        var inFocusMask  = Array(repeating: false, count: numAFPoints)
-        for word in 0..<wordsNeeded {
-            let idx = bitmaskBase + word
-            guard idx * 2 + 1 < bytes.count else { break }
-            let raw = readU16(bytes, at: idx * 2, le: le)
-            for bit in 0..<16 {
-                let ptIdx = word * 16 + bit
-                if ptIdx < numAFPoints {
-                    inFocusMask[ptIdx] = (raw >> bit) & 1 == 1
+        let inFocusBase  = yBase + numAFPoints
+        let selectedBase = inFocusBase + wordsNeeded
+
+        func readBitmask(base: Int) -> [Bool] {
+            var mask = Array(repeating: false, count: numAFPoints)
+            for word in 0..<wordsNeeded {
+                let idx = base + word
+                guard idx * 2 + 1 < bytes.count else { break }
+                let raw = readU16(bytes, at: idx * 2, le: le)
+                for bit in 0..<16 {
+                    let pt = word * 16 + bit
+                    if pt < numAFPoints { mask[pt] = (raw >> bit) & 1 == 1 }
                 }
             }
+            return mask
         }
+
+        let inFocusMask  = readBitmask(base: inFocusBase)
+        let selectedMask = readBitmask(base: selectedBase)
+        print("CanonParser: inFocus any=\(inFocusMask.contains(true))  selected any=\(selectedMask.contains(true))")
 
         var points: [CanonAFPoint] = []
 
@@ -220,11 +264,17 @@ enum CanonMakernoteParser {
             let x = CGFloat(s16(xBase + i))
             let y = CGFloat(s16(yBase + i))
 
-            // Convert from centre-relative pixel coords to normalised 0-1 top-left
             let normCX = 0.5 + x / afImageW
-            let normCY = 0.5 + y / afImageH
-            let normW  = w / afImageW
-            let normH  = h / afImageH
+
+            // Y convention differs between tags:
+            //   0x4013 mirrorless: Y increases downward from centre (matches screen) → add
+            //   0x0026 legacy DSLR: Y increases upward from centre (mathematical) → subtract
+            let normCY = yAxisDownward
+                ? 0.5 + y / afImageH   // screen-native, no flip needed
+                : 0.5 - y / afImageH   // invert so positive Y maps above centre on screen
+
+            let normW = w / afImageW
+            let normH = h / afImageH
 
             let rect = CGRect(
                 x: max(0, min(1, normCX - normW / 2)),
@@ -233,13 +283,21 @@ enum CanonMakernoteParser {
                 height: min(normH, 1)
             )
 
-            print("CanonParser: point[\(i)] x=\(x) y=\(y) w=\(w) h=\(h) inFocus=\(inFocusMask[i]) → normRect=\(rect)")
-            points.append(CanonAFPoint(normRect: rect, isInFocus: inFocusMask[i]))
+            print("CanonParser: point[\(i)] x=\(x) y=\(y) w=\(w) h=\(h) inFocus=\(inFocusMask[i]) selected=\(selectedMask[i]) precise=\(isPrecise) normCY=\(String(format:"%.3f",normCY)) → \(rect)")
+            points.append(CanonAFPoint(
+                normRect:   rect,
+                isInFocus:  inFocusMask[i],
+                isSelected: selectedMask[i],
+                isPrecise:  isPrecise
+            ))
         }
 
-        // Return in-focus points if any, otherwise all valid points
-        let focused = points.filter(\.isInFocus)
-        return focused.isEmpty ? (points.isEmpty ? nil : points) : focused
+        // Priority: inFocus > selected > any valid point
+        let focused  = points.filter(\.isInFocus)
+        if !focused.isEmpty  { return focused }
+        let selected = points.filter(\.isSelected)
+        if !selected.isEmpty { return selected }
+        return points.isEmpty ? nil : points
     }
 
     // MARK: - Binary helpers

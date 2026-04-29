@@ -366,7 +366,11 @@ struct RAWFileDetailView: View {
 // MARK: - AF Point Overlay
 
 /// Draws Canon AF points parsed from the Makernote.
-/// In-focus points are shown in green, others in white.
+/// Colour indicates the confidence level of the point:
+///   green  — camera confirmed focus lock (AFPointsInFocus bitmask)
+///   yellow — camera was actively tracking the point (AFPointsSelected bitmask,
+///            e.g. Animal Eye AF where focus confirmation is not always stored)
+///   white  — fallback: valid point but neither bitmask was set
 struct AFPointOverlay: View {
     let points: [CanonAFPoint]
     let imageSize: CGSize
@@ -392,10 +396,16 @@ struct AFPointOverlay: View {
             ForEach(Array(points.enumerated()), id: \.offset) { _, point in
                 let r = imageFrame.projectedToScreen(
                     normRect: point.normRect, scale: scale, offset: offset)
-                let color: Color = point.isInFocus ? .green : .white.opacity(0.6)
+                // Colour indicates confidence level:
+                //   green  — camera confirmed focus lock (AFPointsInFocus)
+                //   yellow — camera was actively tracking (AFPointsSelected, e.g. Animal Eye AF)
+                //   white  — fallback valid point, neither bitmask was set
+                let color: Color = point.isInFocus  ? .green :
+                                   point.isSelected ? .yellow :
+                                   .white.opacity(0.6)
+                let lineWidth: CGFloat = (point.isInFocus || point.isSelected) ? 2.0 : 1.0
                 let arm = max(6, min(r.width, r.height) * 0.35)
-                AFBrackets(rect: r, color: color, armLength: arm,
-                           lineWidth: point.isInFocus ? 2.0 : 1.0)
+                AFBrackets(rect: r, color: color, armLength: arm, lineWidth: lineWidth)
             }
         }
         .allowsHitTesting(false)
