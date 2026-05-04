@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		AA000001 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = DD000001 /* Assets.xcassets */; };
+		B069DD8E2FA898550095005E /* UKWildlife.mlpackage in Sources */ = {isa = PBXBuildFile; fileRef = B069DD8D2FA898550095005E /* UKWildlife.mlpackage */; };
 		BB09B4A0ECBFB4 /* AnalysisRegionOverlay.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA09B4A0ECBFB4 /* AnalysisRegionOverlay.swift */; };
 		BB1BBD9BF8B221 /* SDCardPromptView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA1BBD9BF8B221 /* SDCardPromptView.swift */; };
 		BB1E5FE5967486 /* CanonMakernoteParser.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA1E5FE5967486 /* CanonMakernoteParser.swift */; };
@@ -39,6 +40,7 @@
 		AAB4FB1680BD00 /* FocusAnalyzer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FocusAnalyzer.swift; sourceTree = "<group>"; };
 		AACE0842184D6A /* RAWFileDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RAWFileDetailView.swift; sourceTree = "<group>"; };
 		AAEC80F9FA071D /* SDCardManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SDCardManager.swift; sourceTree = "<group>"; };
+		B069DD8D2FA898550095005E /* UKWildlife.mlpackage */ = {isa = PBXFileReference; lastKnownFileType = folder.mlpackage; path = UKWildlife.mlpackage; sourceTree = "<group>"; };
 		DD000001 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		DD000002 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		EE000001 /* RawFileBrowser.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = RawFileBrowser.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -82,6 +84,7 @@
 				AA1BBD9BF8B221 /* SDCardPromptView.swift */,
 				AA36639D4BC5F4 /* XMPSidecarWriter.swift */,
 				AA24FE095785F8 /* YOLODetector.swift */,
+				B069DD8D2FA898550095005E /* UKWildlife.mlpackage */,
 			);
 			path = RawFileBrowser;
 			sourceTree = "<group>";
@@ -171,6 +174,7 @@
 				BB2984DC46EF47 /* RAWFileBrowserApp.swift in Sources */,
 				BBCE0842184D6A /* RAWFileDetailView.swift in Sources */,
 				BBA165744D57E5 /* RAWFileGridView.swift in Sources */,
+				B069DD8E2FA898550095005E /* UKWildlife.mlpackage in Sources */,
 				BB6472334FC2A6 /* RAWFileThumbnailCard.swift in Sources */,
 				BB2450D44CBB18 /* RAWImageLoader.swift in Sources */,
 				BBEC80F9FA071D /* SDCardManager.swift in Sources */,

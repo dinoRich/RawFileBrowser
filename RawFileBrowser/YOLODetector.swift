@@ -98,11 +98,11 @@ final class YOLODetector {
 
     /// Change this to match your exported model filename (without extension).
     /// e.g. "yolov8n", "yolov8s", "UKWildlife"
-    static let modelName = "yolov8n"
+    static let modelName = "UKWildlife"
 
     /// Set to true when using a classification model (yolov8n-cls / UKWildlife).
     /// Classification models return class probabilities rather than bounding boxes.
-    static let isClassificationModel = false
+    static let isClassificationModel = true
 
     /// Input size the model was exported with.
     /// Detection models: 640. Classification models: 224.
