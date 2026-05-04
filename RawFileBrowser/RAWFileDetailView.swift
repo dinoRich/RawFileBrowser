@@ -506,17 +506,17 @@ extension CGRect {
         let originX = cx - scaledW / 2 + offset.width
         let originY = cy - scaledH / 2 + offset.height
 
-        // Position uses the correct axis for each direction
-        // Size uses scaledW for both since both w and h were normalised against afImageW
-        let screenW = normRect.width  * scaledW
-        let screenH = normRect.width  * scaledW   // same as screenW — keeps square points square
+        // The AF point is physically square on the sensor.
+        // normW was normalised against sensor width; use it for both axes
+        // so the bracket displays as a square regardless of image orientation.
+        let screenSize = normRect.width * scaledW
+        let screenX    = originX + normRect.minX * scaledW
+        let screenCY   = originY + normRect.midY * scaledH   // Y centre uses scaledH (correct)
 
-        return CGRect(
-            x: originX + normRect.minX * scaledW,
-            y: originY + normRect.minY * scaledH,
-            width:  screenW,
-            height: screenH
-        )
+        return CGRect(x: screenX,
+                      y: screenCY - screenSize / 2,
+                      width:  screenSize,
+                      height: screenSize)
     }
 
 }

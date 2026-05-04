@@ -419,7 +419,7 @@ enum CanonMakernoteParser {
             let normCX = 0.5 + x / afImageW
             let normCY = 0.5 - y / afImageH
             let normW  = w / afImageW
-            let normH  = h / afImageW
+            let normH  = h / afImageH   // correct proportional height — restored
 
             let rect = CGRect(
                 x: max(0, min(1, normCX - normW / 2)),

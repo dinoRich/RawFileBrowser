@@ -148,7 +148,9 @@ struct FocusAnalyzer {
         }
 
         // Step 1 — AF point from camera Makernote
-        let afRect = extractAFRegion(from: url)
+        let afRect = extractAFRegion(from: url,
+                                     imageWidth: cgImage.width,
+                                     imageHeight: cgImage.height)
 
         // Step 2 — Subject detection (YOLO first, Vision fallback)
         let subject = await detectSubject(in: cgImage)
@@ -631,17 +633,33 @@ struct FocusAnalyzer {
 
     // MARK: - EXIF AF point extraction
 
-    private static func extractAFRegion(from url: URL) -> CGRect? {
+    private static func extractAFRegion(from url: URL,
+                                        imageWidth: Int,
+                                        imageHeight: Int) -> CGRect? {
         guard let points = CanonMakernoteParser.extractAFPoints(from: url),
               !points.isEmpty else { return nil }
 
-        // Prefer in-focus points; fall back to all points if none flagged
         let focused = points.filter { $0.isInFocus }
         let target  = focused.isEmpty ? points : focused
 
-        return target.reduce(CGRect.null) { $0.union($1.normRect) }
-    }
+        // The display overlay enforces a square by using normW * scaledW for both
+        // screen width and height. To match that in normalised crop space:
+        //   screen side = normW * scaledW
+        //   as proportion of image height = (normW * scaledW) / scaledH
+        //                                 = normW * (imageWidth / imageHeight)
+        let aspect = CGFloat(imageWidth) / CGFloat(imageHeight)
+        let corrected = target.map { point -> CGRect in
+            let r = point.normRect
+            let normSide = r.width * aspect   // height in proportional coords that gives a square
+            return CGRect(x: r.minX,
+                          y: r.midY - normSide / 2,
+                          width:  r.width,
+                          height: normSide)
+        }
 
+        return corrected.reduce(CGRect.null) { $0.union($1) }
+    }
+    
     // MARK: - Geometry helpers
 
     private static func flipRect(_ r: CGRect) -> CGRect {
