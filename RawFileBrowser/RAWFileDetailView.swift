@@ -2,8 +2,13 @@ import SwiftUI
 import ImageIO
 
 struct RAWFileDetailView: View {
-    let file: RAWFile
+    let fileID: UUID
     @ObservedObject var manager: SDCardManager
+
+    private var file: RAWFile {
+        manager.rawFiles.first(where: { $0.id == fileID }) ?? RAWFile(url: URL(fileURLWithPath: ""))
+    }
+    
     @Environment(\.dismiss) private var dismiss
 
     @State private var fullImage: UIImage?

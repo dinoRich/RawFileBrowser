@@ -93,6 +93,7 @@ struct RAWFileGridView: View {
                         ForEach(filteredFiles) { file in
                             RAWFileThumbnailCard(file: file)
                                 .onTapGesture { selectedFile = file }
+                                .id("\(file.id)-\(file.focusStatus.rawValue)")
                         }
                     }
                     .padding()
@@ -138,7 +139,7 @@ struct RAWFileGridView: View {
         }
         // .navigationSubtitle removed — iOS 26+ only
         .sheet(item: $selectedFile) { file in
-            RAWFileDetailView(file: file, manager: manager)
+            RAWFileDetailView(fileID: file.id, manager: manager)
         }
         .alert("XMP Written", isPresented: Binding(
             get: { xmpResultMessage != nil },
