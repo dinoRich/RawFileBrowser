@@ -15,10 +15,11 @@ struct RAWFileGridView: View {
     }
 
     enum FilterMode: String, CaseIterable {
-        case all = "All"
-        case sharp = "Sharp"
-        case rejected = "Rejected"
-        case unanalyzed = "Unanalyzed"
+        case all         = "All"
+        case sharp       = "Sharp"
+        case rejected    = "Rejected"
+        case missedFocus = "Missed Focus"
+        case unanalyzed  = "Unanalyzed"
     }
 
     private var filteredFiles: [RAWFile] {
@@ -32,9 +33,10 @@ struct RAWFileGridView: View {
         // Filter
         switch filterMode {
         case .all: break
-        case .sharp:      files = files.filter { $0.focusStatus == .sharp }
-        case .rejected:   files = files.filter { $0.isRejected }
-        case .unanalyzed: files = files.filter { $0.focusStatus == .unanalyzed }
+        case .sharp:       files = files.filter { $0.focusStatus == .sharp }
+        case .rejected:    files = files.filter { $0.isRejected }
+        case .missedFocus: files = files.filter { $0.focusStatus == .missedFocus }
+        case .unanalyzed:  files = files.filter { $0.focusStatus == .unanalyzed }
         }
 
         // Sort
@@ -190,6 +192,12 @@ struct RAWFileGridView: View {
             Label("\(manager.rejectedCount) rejected",
                   systemImage: "xmark.circle.fill")
                 .foregroundStyle(.red)
+
+            if manager.rawFiles.filter({ $0.focusStatus == .missedFocus }).count > 0 {
+                Label("\(manager.rawFiles.filter { $0.focusStatus == .missedFocus }.count) missed",
+                      systemImage: "scope")
+                    .foregroundStyle(.purple)
+            }
 
             Spacer()
 

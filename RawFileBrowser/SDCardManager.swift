@@ -25,6 +25,21 @@ struct RAWFile: Identifiable {
     var detectedAnimalLabel: String? = nil
     var analysisRect: CGRect? = nil
     var detectionConfidence: Float? = nil
+    /// Whether the camera AF point overlapped the detected subject.
+    /// nil = no AF point or no subject (not applicable).
+    /// false = AF point was on the background → missed focus.
+    var afOverlapsSubject: Bool? = nil
+    // Diagnostic fields — raw values before thresholds are applied
+    /// Laplacian variance score BEFORE the size-confidence penalty is applied (0-1 normalised)
+    var rawSharpnessScore: Double = 0
+    /// Fraction of image area occupied by the subject body rect (0-1)
+    var subjectBodyArea: Double = 0
+    /// Fraction of image area occupied by the scoring rect (eyes/head/AF point) (0-1)
+    var scoringRectArea: Double = 0
+    /// Whether a camera AF point was found in the file
+    var hadAFPoint: Bool = false
+    var sharpThreshold: Double = 0
+    var acceptableThreshold: Double = 0
     var xmpWritten: Bool = false
     var isRejected: Bool { focusStatus.isRejected }
 }
@@ -39,8 +54,7 @@ extension RAWFile: Hashable, Equatable {
 private let rawExtensions: Set<String> = [
     "raw", "arw", "cr2", "cr3", "nef", "nrw", "orf", "rw2",
     "pef", "raf", "srw", "dng", "3fr", "fff", "iiq", "rwl",
-    "mrw", "x3f", "erf", "kdc", "dcr", "mef", "mos", "ptx",
-    "tif", "tiff"
+    "mrw", "x3f", "erf", "kdc", "dcr", "mef", "mos", "ptx"
 ]
 
 // MARK: - SDCardManager
@@ -148,6 +162,13 @@ final class SDCardManager: ObservableObject {
                     rawFiles[i].detectedAnimalLabel   = result.detectedAnimalLabel
                     rawFiles[i].analysisRect          = result.analysisRect
                     rawFiles[i].detectionConfidence   = result.detectionConfidence
+                    rawFiles[i].afOverlapsSubject     = result.afOverlapsSubject
+                    rawFiles[i].rawSharpnessScore     = result.rawSharpnessScore
+                    rawFiles[i].subjectBodyArea       = result.subjectBodyArea
+                    rawFiles[i].scoringRectArea       = result.scoringRectArea
+                    rawFiles[i].hadAFPoint            = result.hadAFPoint
+                    rawFiles[i].sharpThreshold        = result.sharpThreshold
+                    rawFiles[i].acceptableThreshold   = result.acceptableThreshold
                 }
             }
 
@@ -168,6 +189,13 @@ final class SDCardManager: ObservableObject {
         rawFiles[idx].detectedAnimalLabel   = result.detectedAnimalLabel
         rawFiles[idx].analysisRect          = result.analysisRect
         rawFiles[idx].detectionConfidence   = result.detectionConfidence
+        rawFiles[idx].afOverlapsSubject     = result.afOverlapsSubject
+        rawFiles[idx].rawSharpnessScore     = result.rawSharpnessScore
+        rawFiles[idx].subjectBodyArea       = result.subjectBodyArea
+        rawFiles[idx].scoringRectArea       = result.scoringRectArea
+        rawFiles[idx].hadAFPoint            = result.hadAFPoint
+        rawFiles[idx].sharpThreshold        = result.sharpThreshold
+        rawFiles[idx].acceptableThreshold   = result.acceptableThreshold
     }
 
     var rejectedCount: Int { rawFiles.filter(\.isRejected).count }

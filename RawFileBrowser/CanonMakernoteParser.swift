@@ -54,7 +54,7 @@ enum CanonMakernoteParser {
         // Read first 2MB — covers CMT3 (CR3) or the Makernote (CR2) near file start.
         guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
         defer { handle.closeFile() }
-        let readSize = min(2 * 1024 * 1024, Int((try? handle.seekToEndOfFile()) ?? 0))
+        let readSize = min(2 * 1024 * 1024, Int(handle.seekToEndOfFile()))
         try? handle.seek(toOffset: 0)
         let headerData = handle.readData(ofLength: readSize)
         let bytes = [UInt8](headerData)
@@ -419,7 +419,7 @@ enum CanonMakernoteParser {
             let normCX = 0.5 + x / afImageW
             let normCY = 0.5 - y / afImageH
             let normW  = w / afImageW
-            let normH  = h / afImageH
+            let normH  = h / afImageW
 
             let rect = CGRect(
                 x: max(0, min(1, normCX - normW / 2)),

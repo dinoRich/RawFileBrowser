@@ -41,7 +41,7 @@ struct AnalysisRegionOverlay: View {
         case .animalEyes, .humanEyes:  return .green
         case .animalHead, .humanFace:  return .yellow
         case .animalBody:              return .orange
-        case .afPoint, .afAndSubject:  return .cyan
+        case .afOnSubject, .afPoint, .missedFocus:  return .cyan
         default:                       return .white
         }
     }

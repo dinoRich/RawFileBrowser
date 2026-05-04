@@ -14,6 +14,7 @@ struct RAWFileDetailView: View {
     @State private var showShareSheet = false
     @State private var usedFallback = false
     @State private var xmpMessage: String? = nil
+    @State private var showDiagnostics = false
 
     // Zoom + pan state
     @State private var scale: CGFloat       = 1.0
@@ -183,6 +184,12 @@ struct RAWFileDetailView: View {
                         }.foregroundStyle(.white)
                     }
 
+                    Button { showDiagnostics.toggle() } label: {
+                        Image(systemName: "stethoscope")
+                    }
+                    .foregroundStyle(file.focusStatus != .unanalyzed ? .white : .white.opacity(0.4))
+                    .disabled(file.focusStatus == .unanalyzed)
+
                     Button { showMetadata.toggle() } label: {
                         Image(systemName: "info.circle")
                     }.foregroundStyle(.white)
@@ -212,6 +219,10 @@ struct RAWFileDetailView: View {
             }
             .sheet(isPresented: $showMetadata) {
                 MetadataView(fileName: file.name, metadata: metadata)
+                    .presentationDetents([.medium, .large])
+            }
+            .sheet(isPresented: $showDiagnostics) {
+                FocusDiagnosticView(file: file)
                     .presentationDetents([.medium, .large])
             }
             .sheet(isPresented: $showShareSheet) {
@@ -294,16 +305,22 @@ struct RAWFileDetailView: View {
 
                     if file.focusStatus != .sharp {
                         HStack(spacing: 6) {
-                            if file.blurType != .none && file.blurType != .unknown {
-                                Label(file.blurType.rawValue,
-                                      systemImage: file.blurType == .motionBlur
-                                          ? "arrow.left.and.right" : "scope")
-                                    .foregroundStyle(.orange)
-                            }
-                            if file.subjectSizeConfidence < 0.7 {
-                                Label("Small subject",
-                                      systemImage: "minus.magnifyingglass")
-                                    .foregroundStyle(.yellow)
+                            if file.focusStatus == .missedFocus {
+                                Label("AF point missed subject",
+                                      systemImage: "scope")
+                                    .foregroundStyle(.purple)
+                            } else {
+                                if file.blurType != .none && file.blurType != .unknown {
+                                    Label(file.blurType.rawValue,
+                                          systemImage: file.blurType == .motionBlur
+                                              ? "arrow.left.and.right" : "scope")
+                                        .foregroundStyle(.orange)
+                                }
+                                if file.subjectSizeConfidence < 0.4 {
+                                    Label("Small subject",
+                                          systemImage: "minus.magnifyingglass")
+                                        .foregroundStyle(.yellow)
+                                }
                             }
                         }
                         .font(.caption2)
@@ -339,8 +356,6 @@ struct RAWFileDetailView: View {
         isLoading = true
         let url   = file.url
 
-
-        // Extract Canon AF points via Makernote parser
         let extractedPoints: [CanonAFPoint] = await Task.detached(priority: .userInitiated) {
             CanonMakernoteParser.extractAFPoints(from: url) ?? []
         }.value
@@ -362,11 +377,7 @@ struct RAWFileDetailView: View {
 // MARK: - AF Point Overlay
 
 /// Draws Canon AF points parsed from the Makernote.
-/// Colour indicates the confidence level of the point:
-///   green  — camera confirmed focus lock (AFPointsInFocus bitmask)
-///   yellow — camera was actively tracking the point (AFPointsSelected bitmask,
-///            e.g. Animal Eye AF where focus confirmation is not always stored)
-///   white  — fallback: valid point but neither bitmask was set
+/// In-focus points are shown in green, others in white.
 struct AFPointOverlay: View {
     let points: [CanonAFPoint]
     let imageSize: CGSize
@@ -390,18 +401,12 @@ struct AFPointOverlay: View {
     var body: some View {
         ZStack(alignment: .topLeading) {
             ForEach(Array(points.enumerated()), id: \.offset) { _, point in
-                let r = imageFrame.projectedToScreen(
+                let r = imageFrame.projectedToScreenAFPoint(
                     normRect: point.normRect, scale: scale, offset: offset)
-                // Colour indicates confidence level:
-                //   green  — camera confirmed focus lock (AFPointsInFocus)
-                //   yellow — camera was actively tracking (AFPointsSelected, e.g. Animal Eye AF)
-                //   white  — fallback valid point, neither bitmask was set
-                let color: Color = point.isInFocus  ? .green :
-                                   point.isSelected ? .yellow :
-                                   .white.opacity(0.6)
-                let lineWidth: CGFloat = (point.isInFocus || point.isSelected) ? 2.0 : 1.0
+                let color: Color = point.isInFocus ? .green : .white.opacity(0.6)
                 let arm = max(6, min(r.width, r.height) * 0.35)
-                AFBrackets(rect: r, color: color, armLength: arm, lineWidth: lineWidth)
+                AFBrackets(rect: r, color: color, armLength: arm,
+                           lineWidth: point.isInFocus ? 2.0 : 1.0)
             }
         }
         .allowsHitTesting(false)
@@ -494,4 +499,26 @@ extension CGRect {
             height: normRect.height * scaledH
         )
     }
+    func projectedToScreenAFPoint(normRect: CGRect, scale: CGFloat, offset: CGSize) -> CGRect {
+        let cx = midX, cy = midY
+        let scaledW = width  * scale
+        let scaledH = height * scale
+        let originX = cx - scaledW / 2 + offset.width
+        let originY = cy - scaledH / 2 + offset.height
+
+        // Position uses the correct axis for each direction
+        // Size uses scaledW for both since both w and h were normalised against afImageW
+        let screenW = normRect.width  * scaledW
+        let screenH = normRect.width  * scaledW   // same as screenW — keeps square points square
+
+        return CGRect(
+            x: originX + normRect.minX * scaledW,
+            y: originY + normRect.minY * scaledH,
+            width:  screenW,
+            height: screenH
+        )
+    }
+
 }
+/// Projects AF point normRects where both width and height were normalised
+/// against sensor width, so both axes must scale against scaledW to stay square.

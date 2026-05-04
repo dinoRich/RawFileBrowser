@@ -33,7 +33,8 @@ enum RAWImageLoader {
 
         // 1. Full RAW decode at index 0
         if let cg = CGImageSourceCreateImageAtIndex(src, 0, nil) {
-            return RAWImageLoadResult(image: UIImage(cgImage: cg), metadata: meta,
+            let orientation = imageOrientation(from: src)
+            return RAWImageLoadResult(image: UIImage(cgImage: cg, scale: 1.0, orientation: orientation), metadata: meta,
                                      error: nil, usedFallback: false)
         }
 
@@ -48,7 +49,8 @@ enum RAWImageLoader {
         if count > 1 {
             for i in 1..<count {
                 if let cg = CGImageSourceCreateImageAtIndex(src, i, nil) {
-                    return RAWImageLoadResult(image: UIImage(cgImage: cg), metadata: meta,
+                    let orientation = imageOrientation(from: src)
+                    return RAWImageLoadResult(image: UIImage(cgImage: cg, scale: 1.0, orientation: orientation), metadata: meta,
                                              error: nil, usedFallback: true)
                 }
                 if let cg = CGImageSourceCreateThumbnailAtIndex(src, i, thumbOpts as CFDictionary) {
@@ -154,5 +156,28 @@ enum RAWImageLoader {
             }
         }
         return result
+    }
+    // MARK: - Orientation helper
+
+    /// Reads the EXIF orientation from an image source and converts it
+    /// to the matching UIImage.Orientation so portrait photos display correctly.
+    private static func imageOrientation(from src: CGImageSource) -> UIImage.Orientation {
+        guard let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [String: Any],
+              let raw = props[kCGImagePropertyOrientation as String] as? UInt32,
+              let cgOrientation = CGImagePropertyOrientation(rawValue: raw)
+        else {
+            return .up
+        }
+
+        switch cgOrientation {
+        case .up:            return .up
+        case .upMirrored:    return .upMirrored
+        case .down:          return .down
+        case .downMirrored:  return .downMirrored
+        case .left:          return .left
+        case .leftMirrored:  return .leftMirrored
+        case .right:         return .right
+        case .rightMirrored: return .rightMirrored
+        }
     }
 }

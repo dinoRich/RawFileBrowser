@@ -10,15 +10,20 @@ enum FocusStatus: String, Codable, Hashable, Equatable {
     case sharp        = "Sharp"
     case slightlyBlur = "Slightly Blurry"
     case blurry       = "Blurry"
+    case missedFocus  = "Missed Focus"   // AF point found but didn't land on the subject
     case unanalyzed   = "Not Analyzed"
 
-    var isRejected: Bool { self == .blurry || self == .slightlyBlur }
+    /// True for outcomes where the photo should be considered a reject
+    var isRejected: Bool {
+        self == .blurry || self == .slightlyBlur || self == .missedFocus
+    }
 
     var systemImage: String {
         switch self {
         case .sharp:        return "checkmark.circle.fill"
         case .slightlyBlur: return "exclamationmark.circle.fill"
         case .blurry:       return "xmark.circle.fill"
+        case .missedFocus:  return "scope"          // crosshair icon — visually distinct
         case .unanalyzed:   return "questionmark.circle"
         }
     }
@@ -28,6 +33,7 @@ enum FocusStatus: String, Codable, Hashable, Equatable {
         case .sharp:        return .systemGreen
         case .slightlyBlur: return .systemOrange
         case .blurry:       return .systemRed
+        case .missedFocus:  return .systemPurple
         case .unanalyzed:   return .systemGray
         }
     }
@@ -52,6 +58,24 @@ struct FocusResult {
     let analysisRect: CGRect?
     /// Detection confidence from YOLO (0-1), nil if Vision fallback was used
     let detectionConfidence: Float?
+    /// Whether the AF point overlapped the detected subject.
+    /// nil = no AF point or no subject detected (overlap not applicable).
+    let afOverlapsSubject: Bool?
+
+    // MARK: Diagnostic fields
+    /// Laplacian score BEFORE the size-confidence multiplier (0–1 normalised).
+    /// Compare against the threshold values to see how close the call was.
+    let rawSharpnessScore: Double
+    /// What fraction of the image area the subject BODY occupied (0–1).
+    let subjectBodyArea: Double
+    /// What fraction of the image area the SCORING rect (eyes/head/AF) occupied (0–1).
+    let scoringRectArea: Double
+    /// Whether a camera AF point was found in the Makernote.
+    let hadAFPoint: Bool
+    /// The sharp threshold used for this region (for display in diagnostics).
+    let sharpThreshold: Double
+    /// The acceptable (slightly blurry) threshold used for this region.
+    let acceptableThreshold: Double
 
     enum AnalysisRegion: String {
         case yoloEyes     = "Eyes (YOLO)"
@@ -62,14 +86,19 @@ struct FocusResult {
         case animalBody   = "Animal Body"
         case humanEyes    = "Human Eyes"
         case humanFace    = "Human Face"
-        case afPoint      = "AF Point"
-        case afAndSubject = "AF Point + Subject"
-        case subject      = "Subject (Vision)"
+        case afOnSubject  = "AF on Subject"   // AF point confirmed on animal/person
+        case afPoint      = "AF Point"        // AF point only (no subject detected)
+        case missedFocus  = "Missed Focus"    // AF point confirmed NOT on subject
         case fullImage    = "Full Image"
     }
 }
 
-// MARK: - Per-region thresholds
+// MARK: - Per-region sharpness thresholds
+//
+// normalisationDivisor: raw Laplacian variance is divided by this to produce a 0-1 score.
+// The smaller the crop, the sharper it tends to look at pixel level, so eye crops
+// need a higher divisor to avoid over-rewarding tiny sharp patches.
+// sharp / acceptable: the final normalised score thresholds for Sharp / Slightly Blurry.
 
 private struct RegionThresholds {
     let normalisationDivisor: Double
@@ -83,8 +112,14 @@ private struct RegionThresholds {
 }
 
 private enum Threshold {
+    /// Minimum fractional area for a detected region to be trusted
     static let minSubjectArea = 0.002
+    /// Horizontal:vertical variance ratio that implies motion blur
     static let motionRatio    = 2.5
+    /// Absolute padding (normalised 0-1) added to the AF rect before overlap test.
+    /// 0.10 = 10% of image dimension on each side — intentionally generous because
+    /// AF point rects are tiny and Vision body boxes are approximate.
+    static let afPaddingForOverlap: CGFloat = 0.10
 }
 
 // MARK: - FocusAnalyzer
@@ -92,118 +127,284 @@ private enum Threshold {
 struct FocusAnalyzer {
 
     // MARK: - Entry point
+    //
+    // Decision tree:
+    //
+    //  1. Try to read the camera AF point from the file's Makernote.
+    //  2. Try to detect a subject (animal / human) using Apple Vision.
+    //     (YOLO model is used if present in the bundle, Vision is the fallback.)
+    //
+    //  Then:
+    //   AF + Subject + overlap  →  score sharpness AT the AF point
+    //                              (camera focused correctly on the subject)
+    //   AF + Subject + NO overlap →  MISSED FOCUS  (camera focused on background)
+    //   AF + no subject          →  score sharpness AT the AF point
+    //   no AF + Subject          →  score sharpness AT the best subject region
+    //   no AF + no Subject       →  score sharpness of the full image
 
     static func analyze(url: URL) async -> FocusResult {
-        guard let cgImage = loadThumbnail(from: url, maxDimension: 1536) else {
+        guard let cgImage = loadThumbnail(from: url, maxDimension: 2048) else {
             return unanalyzed()
         }
 
-        let afRect = extractAFRegion(from: url,
-                                     imageWidth: cgImage.width,
-                                     imageHeight: cgImage.height)
+        // Step 1 — AF point from camera Makernote
+        let afRect = extractAFRegion(from: url)
 
-        // --- YOLO path (requires model in bundle) ---
-        let yoloDetections = await YOLODetector.shared.detect(cgImage: cgImage)
-        let primaryYOLO    = bestAnimalDetection(from: yoloDetections)
+        // Step 2 — Subject detection (YOLO first, Vision fallback)
+        let subject = await detectSubject(in: cgImage)
 
-        if let yolo = primaryYOLO {
-            return analyzeWithYOLO(yolo, cgImage: cgImage, afRect: afRect)
-        }
-
-        // --- Vision fallback (no model / subject not in YOLO classes) ---
-        return await analyzeWithVision(cgImage: cgImage, afRect: afRect)
+        // Step 3 — Route to the correct analysis path
+        return route(cgImage: cgImage, afRect: afRect, subject: subject)
     }
 
-    // MARK: - YOLO analysis path
+    // MARK: - Routing
+
+    private static func route(cgImage: CGImage,
+                               afRect: CGRect?,
+                               subject: SubjectResult) -> FocusResult {
+
+        let hasAF      = afRect != nil
+        let hasSubject = subject.bestRect != nil
+
+        switch (hasAF, hasSubject) {
+
+        // ── AF + Subject ──────────────────────────────────────────────────────
+        case (true, true):
+            let af = afRect!
+            // Expand the AF rect before testing overlap.
+            // AF point rects parsed from Makernote are often very small (e.g. 163×163 px
+            // in a 6960-wide sensor → ~2.3% of image width as normalised coords).
+            // Subject bboxes from Vision are also approximate.
+            // A generous expansion prevents false "missed focus" calls.
+            // Use the subject BODY rect (full silhouette) for overlap, not the
+            // precision-scoring rect (eyes/head). An AF point on a bird's wing is
+            // still on the subject even though it misses the tiny eye crop.
+            let subjectBody = subject.bodyRect ?? subject.bestRect!
+
+            // Pad the AF rect by a fixed 10% of image in each direction.
+            // Relative expansion (e.g. 3× af.width) breaks when the AF rect is tiny.
+            let expandedAF = af.insetBy(
+                dx: -Threshold.afPaddingForOverlap,
+                dy: -Threshold.afPaddingForOverlap
+            ).clamped(to: CGRect(x: 0, y: 0, width: 1, height: 1))
+
+            let overlaps = expandedAF.intersects(subjectBody)
+
+            if overlaps {
+                // AF landed on the subject — score sharpness at the AF point itself
+                // (not the subject rect, because the AF point is where the lens focused)
+                print("FocusAnalyzer: AF overlaps subject → score at AF point")
+                return scoreAtRect(af,
+                                   in: cgImage,
+                                   region: .afOnSubject,
+                                   label: subject.label,
+                                   confidence: subject.confidence,
+                                   afOverlaps: true,
+                                   bodyRect: subjectBody,
+                                   hadAF: true)
+            } else {
+                // AF point is clearly on the background — flag as missed focus
+                print("FocusAnalyzer: AF does NOT overlap subject → missed focus")
+                return missedFocusResult(afRect: af,
+                                         subjectRect: subjectBody,
+                                         label: subject.label,
+                                         confidence: subject.confidence)
+            }
+
+        // ── AF only (no subject detected) ────────────────────────────────────
+        case (true, false):
+            print("FocusAnalyzer: AF found, no subject → score at AF point")
+            return scoreAtRect(afRect!,
+                               in: cgImage,
+                               region: .afPoint,
+                               label: nil,
+                               confidence: nil,
+                               afOverlaps: nil,
+                               hadAF: true)
+
+        // ── Subject only (no AF data) ─────────────────────────────────────────
+        case (false, true):
+            print("FocusAnalyzer: No AF, subject found → score at subject region")
+            let (rect, region) = bestSubjectRegion(subject)
+            return scoreAtRect(rect,
+                               in: cgImage,
+                               region: region,
+                               label: subject.label,
+                               confidence: subject.confidence,
+                               afOverlaps: nil,
+                               bodyRect: subject.bodyRect)
+
+        // ── No AF, no subject ─────────────────────────────────────────────────
+        case (false, false):
+            print("FocusAnalyzer: No AF, no subject → full image sharpness")
+            return scoreFullImage(cgImage: cgImage)
+        }
+    }
+
+    // MARK: - Missed focus result
+
+    /// Returns a FocusResult that records the missed-focus condition.
+    /// We still measure sharpness at the AF point (the camera DID focus there,
+    /// just not on the subject), and we store the subject rect as the analysisRect
+    /// so the overlay shows where the subject actually was.
+    private static func missedFocusResult(afRect: CGRect,
+                                           subjectRect: CGRect,
+                                           label: String?,
+                                           confidence: Float?) -> FocusResult {
+        return FocusResult(
+            status:                .missedFocus,
+            score:                 0,
+            analysisRegion:        .missedFocus,
+            blurType:              .unknown,
+            subjectSizeConfidence: 1.0,
+            detectedAnimalLabel:   label,
+            analysisRect:          subjectRect,
+            detectionConfidence:   confidence,
+            afOverlapsSubject:     false,
+            rawSharpnessScore:     0,
+            subjectBodyArea:       Double(subjectRect.width * subjectRect.height),
+            scoringRectArea:       Double(afRect.width * afRect.height),
+            hadAFPoint:            true,
+            sharpThreshold:        0,
+            acceptableThreshold:   0
+        )
+    }
+
+    // MARK: - Score at a specific normalised rect
+
+    private static func scoreAtRect(_ normRect: CGRect,
+                                     in cgImage: CGImage,
+                                     region: FocusResult.AnalysisRegion,
+                                     label: String?,
+                                     confidence: Float?,
+                                     afOverlaps: Bool?,
+                                     bodyRect: CGRect? = nil,
+                                     hadAF: Bool = false) -> FocusResult {
+        // Use bodyRect for size confidence if available — the scoring crop (eyes/head)
+        // is intentionally small even when the animal fills the frame, so using it
+        // would wrongly trigger the "small subject" warning.
+        let sizeConf = subjectSizeConfidence(rect: bodyRect ?? normRect,
+                                             imageWidth: cgImage.width,
+                                             imageHeight: cgImage.height)
+
+        let bodyArea    = Double((bodyRect ?? normRect).width * (bodyRect ?? normRect).height)
+        let scoringArea = Double(normRect.width * normRect.height)
+
+        // If the crop would be too small to score reliably, fall back to full image
+        guard let cropped = crop(cgImage, to: normRect), cropped.width > 4, cropped.height > 4 else {
+            return scoreFullImage(cgImage: cgImage, label: label, confidence: confidence,
+                                  afOverlaps: afOverlaps, hadAF: hadAF)
+        }
+
+        return score(cgImage: cropped,
+                     region: region,
+                     sizeConfidence: sizeConf,
+                     analysisRect: normRect,
+                     animalLabel: label,
+                     detectionConfidence: confidence,
+                     afOverlapsSubject: afOverlaps,
+                     bodyArea: bodyArea,
+                     scoringArea: scoringArea,
+                     hadAF: hadAF)
+    }
+
+    private static func scoreFullImage(cgImage: CGImage,
+                                        label: String? = nil,
+                                        confidence: Float? = nil,
+                                        afOverlaps: Bool? = nil,
+                                        hadAF: Bool = false) -> FocusResult {
+        score(cgImage: cgImage,
+              region: .fullImage,
+              sizeConfidence: 0.7,
+              analysisRect: nil,
+              animalLabel: label,
+              detectionConfidence: confidence,
+              afOverlapsSubject: afOverlaps,
+              hadAF: hadAF)
+    }
+
+    // MARK: - Subject detection
+
+    // A unified struct that both the YOLO path and the Vision path fill in.
+    private struct SubjectResult {
+        /// The best available rect for this subject (eyes > head > body)
+        let bestRect:   CGRect?
+        /// The subject's full body rect (used for overlap checking against AF point)
+        let bodyRect:   CGRect?
+        let label:      String?
+        let confidence: Float?
+    }
+
+    private static func detectSubject(in cgImage: CGImage) async -> SubjectResult {
+        // Try YOLO first (requires model in bundle — gracefully absent)
+        let yoloDetections = await YOLODetector.shared.detect(cgImage: cgImage)
+        if let best = bestAnimalDetection(from: yoloDetections) {
+            // Prefer eyes > head > body for sharpness scoring precision
+            let bestRect = best.eyeRect ?? best.headRect
+            return SubjectResult(
+                bestRect:   bestRect,
+                bodyRect:   best.boundingBox,
+                label:      best.label.capitalized,
+                confidence: best.confidence
+            )
+        }
+
+        // Vision fallback
+        async let animalResult = detectAnimalRegion(in: cgImage)
+        async let humanResult  = detectHumanRegion(in: cgImage)
+        let animal = await animalResult
+        let human  = await humanResult
+
+        // Pick the best Vision region
+        if let eyes = animal.eyeRect, eyes.area > 0.0004 {
+            return SubjectResult(bestRect: eyes, bodyRect: animal.bodyRect,
+                                 label: animal.animalLabel, confidence: nil)
+        }
+        if let head = animal.headRect {
+            return SubjectResult(bestRect: head, bodyRect: animal.bodyRect,
+                                 label: animal.animalLabel, confidence: nil)
+        }
+        if let eyes = human.eyeRect, eyes.area > 0.0004 {
+            return SubjectResult(bestRect: eyes, bodyRect: human.faceRect,
+                                 label: nil, confidence: nil)
+        }
+        if let face = human.faceRect {
+            return SubjectResult(bestRect: face, bodyRect: face,
+                                 label: nil, confidence: nil)
+        }
+        if let body = animal.bodyRect {
+            return SubjectResult(bestRect: body, bodyRect: body,
+                                 label: animal.animalLabel, confidence: nil)
+        }
+
+        return SubjectResult(bestRect: nil, bodyRect: nil, label: nil, confidence: nil)
+    }
+
+    /// Given a SubjectResult, return the best (most specific) rect and matching region enum.
+    private static func bestSubjectRegion(_ subject: SubjectResult)
+        -> (CGRect, FocusResult.AnalysisRegion) {
+        guard let rect = subject.bestRect else {
+            return (CGRect(x: 0, y: 0, width: 1, height: 1), .fullImage)
+        }
+        // We can't tell eyes from head here without more context,
+        // so use body-level thresholds for safety (slightly more lenient).
+        return (rect, .animalBody)
+    }
+
+    // MARK: - YOLO helpers
 
     private static func bestAnimalDetection(from detections: [YOLODetection]) -> YOLODetection? {
-        // Prefer animals; take highest confidence
         let animals = detections.filter { $0.isAnimal }
         return animals.max(by: { $0.confidence < $1.confidence })
             ?? detections.max(by: { $0.confidence < $1.confidence })
     }
 
-    private static func analyzeWithYOLO(_ detection: YOLODetection,
-                                         cgImage: CGImage,
-                                         afRect: CGRect?) -> FocusResult {
-        // Choose the most precise region available
-        let (analysisRect, region): (CGRect, FocusResult.AnalysisRegion)
-
-        if let eyes = detection.eyeRect, eyes.area > 0.0004 {
-            (analysisRect, region) = (eyes, .yoloEyes)
-        } else {
-            let head = detection.headRect
-            // Optionally intersect with AF point for extra precision
-            if let af = afRect {
-                let intersection = head.intersection(af)
-                if !intersection.isNull && intersection.area > 0.001 {
-                    (analysisRect, region) = (intersection, .afAndSubject)
-                } else {
-                    (analysisRect, region) = (head, .yoloHead)
-                }
-            } else {
-                (analysisRect, region) = (head, .yoloHead)
-            }
-        }
-
-        let sizeConf = subjectSizeConfidence(rect: analysisRect,
-                                             imageWidth: cgImage.width,
-                                             imageHeight: cgImage.height)
-
-        guard let cropped = crop(cgImage, to: analysisRect) else {
-            return scoreFullImage(cgImage: cgImage,
-                                  label: detection.label,
-                                  confidence: detection.confidence,
-                                  analysisRect: detection.boundingBox)
-        }
-
-        return score(cgImage: cropped, region: region,
-                     sizeConfidence: sizeConf,
-                     analysisRect: analysisRect,
-                     animalLabel: detection.label.capitalized,
-                     detectionConfidence: detection.confidence)
-    }
-
-    // MARK: - Vision fallback path
-
-    private static func analyzeWithVision(cgImage: CGImage,
-                                          afRect: CGRect?) async -> FocusResult {
-        async let animalResult = detectAnimalRegion(in: cgImage)
-        async let humanResult  = detectHumanRegion(in: cgImage)
-
-        let animal = await animalResult
-        let human  = await humanResult
-
-        let (analysisRect, region) = chooseBestRegion(
-            animal: animal, human: human, afRect: afRect
-        )
-
-        let sizeConf = subjectSizeConfidence(
-            rect: analysisRect,
-            imageWidth: cgImage.width,
-            imageHeight: cgImage.height
-        )
-
-        let targetImage: CGImage
-        if let rect = analysisRect, let cropped = crop(cgImage, to: rect) {
-            targetImage = cropped
-        } else {
-            targetImage = cgImage
-        }
-
-        return score(cgImage: targetImage, region: region,
-                     sizeConfidence: sizeConf,
-                     analysisRect: analysisRect,
-                     animalLabel: animal.animalLabel,
-                     detectionConfidence: nil)
-    }
-
     // MARK: - Vision animal detection
 
     private struct AnimalDetectionResult {
-        let eyeRect:    CGRect?
-        let headRect:   CGRect?
-        let bodyRect:   CGRect?
+        let eyeRect:     CGRect?
+        let headRect:    CGRect?
+        let bodyRect:    CGRect?
         let animalLabel: String?
     }
 
@@ -254,7 +455,6 @@ struct FocusAnalyzer {
             let headRect = headPoints.isEmpty ? nil : boundingRectWithPadding(headPoints, pad: 0.04)
             let bodyRect = allPoints.isEmpty  ? nil : boundingRectWithPadding(allPoints,  pad: 0.02)
 
-            // Also get species label
             let labelReq = VNRecognizeAnimalsRequest()
             try? VNImageRequestHandler(cgImage: cgImage, options: [:]).perform([labelReq])
             let label = labelReq.results?.first?.labels
@@ -324,44 +524,22 @@ struct FocusAnalyzer {
         }
     }
 
-    // MARK: - Vision region cascade
-
-    private static func chooseBestRegion(
-        animal: AnimalDetectionResult,
-        human: HumanDetectionResult,
-        afRect: CGRect?
-    ) -> (CGRect?, FocusResult.AnalysisRegion) {
-        if let eyes = animal.eyeRect,  eyes.area > 0.0004 { return (eyes, .animalEyes) }
-        if let head = animal.headRect {
-            if let af = afRect {
-                let i = head.intersection(af)
-                if !i.isNull && i.area > 0.001 { return (i, .afAndSubject) }
-            }
-            return (head, .animalHead)
-        }
-        if let eyes = human.eyeRect,  eyes.area > 0.0004 { return (eyes, .humanEyes) }
-        if let face = human.faceRect                      { return (face, .humanFace) }
-        if let af = afRect, let body = animal.bodyRect {
-            let i = af.intersection(body)
-            if !i.isNull && i.area > 0.001 { return (i, .afAndSubject) }
-        }
-        if let af = afRect {
-            let expanded = af.insetBy(dx: -af.width * 0.5, dy: -af.height * 0.5)
-                .clamped(to: CGRect(x: 0, y: 0, width: 1, height: 1))
-            return (expanded, .afPoint)
-        }
-        if let body = animal.bodyRect { return (body, .animalBody) }
-        return (nil, .fullImage)
-    }
-
-    // MARK: - Sharpness scoring
+    // MARK: - Sharpness scoring (Laplacian variance)
+    //
+    // We compute the variance of the discrete Laplacian (a measure of edge strength)
+    // across the cropped region. A sharp image has high variance; a blurry image has low.
+    // We use both horizontal and vertical Laplacians to detect motion blur direction.
 
     private static func score(cgImage: CGImage,
                                region: FocusResult.AnalysisRegion,
                                sizeConfidence: Double,
                                analysisRect: CGRect?,
                                animalLabel: String?,
-                               detectionConfidence: Float?) -> FocusResult {
+                               detectionConfidence: Float?,
+                               afOverlapsSubject: Bool?,
+                               bodyArea: Double = 0,
+                               scoringArea: Double = 0,
+                               hadAF: Bool = false) -> FocusResult {
         let w = cgImage.width, h = cgImage.height
         guard w > 2 && h > 2 else { return unanalyzed() }
 
@@ -394,19 +572,21 @@ struct FocusAnalyzer {
 
         let thresholds: RegionThresholds
         switch region {
-        case .yoloEyes, .animalEyes, .humanEyes:         thresholds = .eyes
-        case .yoloHead, .animalHead, .humanFace:          thresholds = .head
-        case .yoloBody, .animalBody, .afAndSubject, .afPoint: thresholds = .body
-        default:                                          thresholds = .full
+        case .animalEyes, .humanEyes:                         thresholds = .eyes
+        case .animalHead, .humanFace, .yoloHead:              thresholds = .head
+        case .yoloEyes:                                       thresholds = .eyes
+        case .yoloBody, .animalBody, .afOnSubject, .afPoint:  thresholds = .body
+        default:                                              thresholds = .full
         }
 
-        let finalScore = min(combined / thresholds.normalisationDivisor, 1.0) * sizeConfidence
+        let rawScore   = min(combined / thresholds.normalisationDivisor, 1.0)
+        let finalScore = rawScore * sizeConfidence
 
         let maxVar = max(varH, varV), minVar = min(varH, varV)
         let blurType: BlurType
         if finalScore >= thresholds.sharp {
             blurType = .none
-        } else if maxVar > 1.0 && (minVar/maxVar) < (1.0/Threshold.motionRatio) {
+        } else if maxVar > 1.0 && (minVar / maxVar) < (1.0 / Threshold.motionRatio) {
             blurType = .motionBlur
         } else if finalScore < thresholds.acceptable {
             blurType = .defocus
@@ -424,41 +604,38 @@ struct FocusAnalyzer {
         return FocusResult(status: status, score: finalScore, analysisRegion: region,
                            blurType: blurType, subjectSizeConfidence: sizeConfidence,
                            detectedAnimalLabel: animalLabel, analysisRect: analysisRect,
-                           detectionConfidence: detectionConfidence)
-    }
-
-    private static func scoreFullImage(cgImage: CGImage,
-                                       label: String,
-                                       confidence: Float,
-                                       analysisRect: CGRect) -> FocusResult {
-        score(cgImage: cgImage, region: .yoloBody, sizeConfidence: 0.7,
-              analysisRect: analysisRect, animalLabel: label.capitalized,
-              detectionConfidence: confidence)
+                           detectionConfidence: detectionConfidence,
+                           afOverlapsSubject: afOverlapsSubject,
+                           rawSharpnessScore: rawScore,
+                           subjectBodyArea: bodyArea,
+                           scoringRectArea: scoringArea,
+                           hadAFPoint: hadAF,
+                           sharpThreshold: thresholds.sharp,
+                           acceptableThreshold: thresholds.acceptable)
     }
 
     // MARK: - Subject size confidence
+    //
+    // Reduces the final score when the subject region is very small in the frame.
+    // A tiny crop is more likely to produce a misleadingly high sharpness score
+    // (a single sharp hair, a glinting eye) that doesn't reflect the overall image.
 
-    private static func subjectSizeConfidence(rect: CGRect?,
+    private static func subjectSizeConfidence(rect: CGRect,
                                               imageWidth: Int,
                                               imageHeight: Int) -> Double {
-        guard let rect else { return 0.7 }
         let area = Double(rect.width * rect.height)
         if area >= Threshold.minSubjectArea * 5 { return 1.0 }
         if area <  Threshold.minSubjectArea      { return 0.3 }
-        return 0.3 + 0.7*(area - Threshold.minSubjectArea)/(Threshold.minSubjectArea*4)
+        return 0.3 + 0.7 * (area - Threshold.minSubjectArea) / (Threshold.minSubjectArea * 4)
     }
 
-    // MARK: - EXIF AF point
+    // MARK: - EXIF AF point extraction
 
-    private static func extractAFRegion(from url: URL,
-                                        imageWidth: Int,
-                                        imageHeight: Int) -> CGRect? {
-        // Use CanonMakernoteParser which handles both standard EXIF SubjectArea
-        // and Canon R7/R3/R50/R6mkII Makernote AFInfo2 (tag 0x0026)
+    private static func extractAFRegion(from url: URL) -> CGRect? {
         guard let points = CanonMakernoteParser.extractAFPoints(from: url),
               !points.isEmpty else { return nil }
 
-        // Use the union of all in-focus points as the AF region
+        // Prefer in-focus points; fall back to all points if none flagged
         let focused = points.filter { $0.isInFocus }
         let target  = focused.isEmpty ? points : focused
 
@@ -474,15 +651,17 @@ struct FocusAnalyzer {
     private static func boundingRectWithPadding(_ points: [CGPoint], pad: CGFloat) -> CGRect {
         let minX = points.map(\.x).min()!, maxX = points.map(\.x).max()!
         let minY = points.map(\.y).min()!, maxY = points.map(\.y).max()!
-        let x = max(0, minX-pad), y = max(0, minY-pad)
-        let w = min(1-x, (maxX-minX)+pad*2), h = min(1-y, (maxY-minY)+pad*2)
+        let x = max(0, minX - pad), y = max(0, minY - pad)
+        let w = min(1 - x, (maxX - minX) + pad * 2), h = min(1 - y, (maxY - minY) + pad * 2)
         return CGRect(x: x, y: y, width: max(w, 0.01), height: max(h, 0.01))
     }
 
     private static func crop(_ image: CGImage, to norm: CGRect) -> CGImage? {
         image.cropping(to: CGRect(
-            x: norm.minX * CGFloat(image.width),  y: norm.minY * CGFloat(image.height),
-            width: norm.width * CGFloat(image.width), height: norm.height * CGFloat(image.height)
+            x: norm.minX * CGFloat(image.width),
+            y: norm.minY * CGFloat(image.height),
+            width:  norm.width  * CGFloat(image.width),
+            height: norm.height * CGFloat(image.height)
         ))
     }
 
@@ -498,14 +677,17 @@ struct FocusAnalyzer {
     }
 
     private static func gray(_ p: [UInt8], x: Int, y: Int, w: Int) -> Int {
-        let i = (y*w+x)*4
-        return (Int(p[i])*299 + Int(p[i+1])*587 + Int(p[i+2])*114)/1000
+        let i = (y * w + x) * 4
+        return (Int(p[i]) * 299 + Int(p[i+1]) * 587 + Int(p[i+2]) * 114) / 1000
     }
 
     private static func unanalyzed() -> FocusResult {
         FocusResult(status: .unanalyzed, score: 0, analysisRegion: .fullImage,
                     blurType: .unknown, subjectSizeConfidence: 0,
-                    detectedAnimalLabel: nil, analysisRect: nil, detectionConfidence: nil)
+                    detectedAnimalLabel: nil, analysisRect: nil,
+                    detectionConfidence: nil, afOverlapsSubject: nil,
+                    rawSharpnessScore: 0, subjectBodyArea: 0, scoringRectArea: 0,
+                    hadAFPoint: false, sharpThreshold: 0, acceptableThreshold: 0)
     }
 }
 
@@ -513,8 +695,8 @@ private extension CGRect {
     var area: CGFloat { width * height }
     func clamped(to b: CGRect) -> CGRect {
         let x = max(b.minX, min(minX, b.maxX)), y = max(b.minY, min(minY, b.maxY))
-        let w = min(maxX, b.maxX)-x, h = min(maxY, b.maxY)-y
-        return CGRect(x: x, y: y, width: max(w,0), height: max(h,0))
+        let w = min(maxX, b.maxX) - x, h = min(maxY, b.maxY) - y
+        return CGRect(x: x, y: y, width: max(w, 0), height: max(h, 0))
     }
 }
 
