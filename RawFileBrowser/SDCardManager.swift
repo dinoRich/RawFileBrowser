@@ -24,7 +24,7 @@ struct RAWFile: Identifiable {
     var subjectSizeConfidence: Double = 0
     var detectedAnimalLabel: String? = nil
     var analysisRect: CGRect? = nil
-    var subjectBodyRect: CGRect? = nil
+    var subjectContour: [CGPoint]? = nil
     var detectionConfidence: Float? = nil
     /// Whether the camera AF point overlapped the detected subject.
     /// nil = no AF point or no subject (not applicable).
@@ -166,7 +166,7 @@ final class SDCardManager: ObservableObject {
                     rawFiles[i].subjectSizeConfidence = result.subjectSizeConfidence
                     rawFiles[i].detectedAnimalLabel   = result.detectedAnimalLabel
                     rawFiles[i].analysisRect          = result.analysisRect
-                    rawFiles[i].subjectBodyRect       = result.subjectBodyRect
+                    rawFiles[i].subjectContour        = result.subjectContour
                     rawFiles[i].detectionConfidence   = result.detectionConfidence
                     rawFiles[i].afOverlapsSubject     = result.afOverlapsSubject
                     rawFiles[i].afOnEye               = result.afOnEye
@@ -195,7 +195,7 @@ final class SDCardManager: ObservableObject {
         rawFiles[idx].subjectSizeConfidence = result.subjectSizeConfidence
         rawFiles[idx].detectedAnimalLabel   = result.detectedAnimalLabel
         rawFiles[idx].analysisRect          = result.analysisRect
-        rawFiles[idx].subjectBodyRect       = result.subjectBodyRect
+        rawFiles[idx].subjectContour        = result.subjectContour
         rawFiles[idx].detectionConfidence   = result.detectionConfidence
         rawFiles[idx].afOverlapsSubject     = result.afOverlapsSubject
         rawFiles[idx].afOnEye               = result.afOnEye

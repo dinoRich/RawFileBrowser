@@ -56,10 +56,10 @@ struct FocusResult {
     let detectedAnimalLabel: String?
     /// Normalised (0-1) rect of the analysed region, top-left origin.
     let analysisRect: CGRect?
-    /// Normalised (0-1) tight bounding box of the detected subject body, for the overlay.
-    /// Only set when sourced from a real localised detection (foreground mask, pose joints,
-    /// or YOLO detector). nil when only VNRecognizeAnimalsRequest was used.
-    let subjectBodyRect: CGRect?
+    /// Normalised (0-1) contour points tracing the subject silhouette.
+    /// Derived from VNGenerateForegroundInstanceMaskRequest — the same API used
+    /// by Photos' "lift subject". nil when no subject was localised.
+    let subjectContour: [CGPoint]?
     /// Detection confidence from YOLO (0-1), nil if Vision fallback was used
     let detectionConfidence: Float?
     /// Whether the AF point overlapped the detected subject.
@@ -208,7 +208,6 @@ struct FocusAnalyzer {
 
             if overlaps {
                 // AF landed on the subject — score sharpness at the AF point itself
-                // (not the subject rect, because the AF point is where the lens focused)
                 print("FocusAnalyzer: AF overlaps subject → score at AF point (afOnEye=\(String(describing: afOnEye)))")
                 return scoreAtRect(af,
                                    in: cgImage,
@@ -218,17 +217,17 @@ struct FocusAnalyzer {
                                    afOverlaps: true,
                                    afOnEye: afOnEye,
                                    bodyRect: subjectBody,
-                                   bodyRectIsLocalised: subject.bodyRectIsLocalised,
-                                   hadAF: true)
+                                   hadAF: true,
+                                   subjectContour: subject.contour)
             } else {
                 // AF point is clearly on the background — flag as missed focus
                 print("FocusAnalyzer: AF does NOT overlap subject → missed focus")
                 return missedFocusResult(afRect: af,
                                          subjectRect: subjectBody,
-                                         subjectBodyIsLocalised: subject.bodyRectIsLocalised,
                                          label: subject.label,
                                          confidence: subject.confidence,
-                                         afOnEye: afOnEye)
+                                         afOnEye: afOnEye,
+                                         subjectContour: subject.contour)
             }
 
         // ── AF only (no subject detected) ────────────────────────────────────
@@ -253,7 +252,7 @@ struct FocusAnalyzer {
                                confidence: subject.confidence,
                                afOverlaps: nil,
                                bodyRect: subject.bodyRect,
-                               bodyRectIsLocalised: subject.bodyRectIsLocalised)
+                               subjectContour: subject.contour)
 
         // ── No AF, no subject ─────────────────────────────────────────────────
         case (false, false):
@@ -285,10 +284,10 @@ struct FocusAnalyzer {
     /// so the overlay shows where the subject actually was.
     private static func missedFocusResult(afRect: CGRect,
                                            subjectRect: CGRect,
-                                           subjectBodyIsLocalised: Bool = false,
                                            label: String?,
                                            confidence: Float?,
-                                           afOnEye: Bool? = nil) -> FocusResult {
+                                           afOnEye: Bool? = nil,
+                                           subjectContour: [CGPoint]? = nil) -> FocusResult {
         return FocusResult(
             status:                .missedFocus,
             score:                 0,
@@ -297,7 +296,7 @@ struct FocusAnalyzer {
             subjectSizeConfidence: 1.0,
             detectedAnimalLabel:   label,
             analysisRect:          subjectRect,
-            subjectBodyRect:       subjectBodyIsLocalised ? subjectRect : nil,
+            subjectContour:        subjectContour,
             detectionConfidence:   confidence,
             afOverlapsSubject:     false,
             afOnEye:               afOnEye,
@@ -320,8 +319,8 @@ struct FocusAnalyzer {
                                      afOverlaps: Bool?,
                                      afOnEye: Bool? = nil,
                                      bodyRect: CGRect? = nil,
-                                     bodyRectIsLocalised: Bool = false,
-                                     hadAF: Bool = false) -> FocusResult {
+                                     hadAF: Bool = false,
+                                     subjectContour: [CGPoint]? = nil) -> FocusResult {
         // Use bodyRect for size confidence if available — the scoring crop (eyes/head)
         // is intentionally small even when the animal fills the frame, so using it
         // would wrongly trigger the "small subject" warning.
@@ -338,10 +337,6 @@ struct FocusAnalyzer {
                                   afOverlaps: afOverlaps, afOnEye: afOnEye, hadAF: hadAF)
         }
 
-        // Only pass a body rect for the overlay when it is genuinely localised.
-        // VNRecognizeAnimalsRequest body rects are full-image and must not be shown.
-        let overlayBodyRect = bodyRectIsLocalised ? bodyRect : nil
-
         return score(cgImage: cropped,
                      region: region,
                      sizeConfidence: sizeConf,
@@ -353,7 +348,7 @@ struct FocusAnalyzer {
                      bodyArea: bodyArea,
                      scoringArea: scoringArea,
                      hadAF: hadAF,
-                     bodyRect: overlayBodyRect)
+                     subjectContour: subjectContour)
     }
 
     private static func scoreFullImage(cgImage: CGImage,
@@ -381,61 +376,47 @@ struct FocusAnalyzer {
         let bestRect:   CGRect?
         /// The subject's eye rect specifically — used to test AF-on-eye
         let eyeRect:    CGRect?
-        /// The subject's full body rect (used for overlap checking and the outline overlay)
+        /// The subject's full body rect (used for overlap checking against AF point)
         let bodyRect:   CGRect?
-        /// True when bodyRect is a genuine localised detection (mask, pose joints, or
-        /// YOLO detector bbox). False when it came from VNRecognizeAnimalsRequest.
-        let bodyRectIsLocalised: Bool
+        /// Normalised contour points from VNGenerateForegroundInstanceMaskRequest.
+        /// Used to draw the subject silhouette overlay. nil when unavailable.
+        let contour:    [CGPoint]?
         let label:      String?
         let confidence: Float?
     }
 
     private static func detectSubject(in cgImage: CGImage) async -> SubjectResult {
 
-        // Run foreground mask and YOLO concurrently — both are independent.
-        // The mask gives us a tight body outline; YOLO gives us species + eye/head rects.
-        async let maskRectTask: CGRect? = {
+        // Run foreground mask contour and YOLO concurrently — independent operations.
+        async let contourTask: [CGPoint]? = {
             if #available(iOS 17.0, *) {
-                return await foregroundMaskBodyRect(cgImage: cgImage)
+                return await foregroundMaskContour(cgImage: cgImage)
             }
             return nil
         }()
         async let yoloTask = YOLODetector.shared.detect(cgImage: cgImage)
 
-        let maskRect      = await maskRectTask
+        let contour        = await contourTask
         let yoloDetections = await yoloTask
 
-        // The mask rect is a genuine localised detection whenever it's non-nil.
-        let maskIsLocalised = maskRect != nil
+        // Bounding rect of the contour — used for overlap testing and size confidence.
+        // Falls back to nil when no contour was found.
+        let contourBodyRect: CGRect? = contour.map { boundingRectWithPadding($0, pad: 0.005) }
 
         if let best = bestAnimalDetection(from: yoloDetections) {
-            // YOLO found the species. Use the mask rect as the body outline if
-            // available — it's tighter and more accurate than the classifier's
-            // full-image bbox. Fall back to YOLO's own bbox only for detection
-            // models (where boundingBox is a real tight bbox, not full-image).
+            // YOLO identified the species. Use the contour bbox as bodyRect when
+            // available (tighter than YOLO's classifier full-image bbox).
+            // For detection models (non-classifier) YOLO provides a real bbox.
             let isClassifier = YOLODetector.isClassificationModel
-            let bodyRect: CGRect?
-            let bodyLocalised: Bool
-            if let mask = maskRect {
-                bodyRect      = mask
-                bodyLocalised = true
-            } else if !isClassifier {
-                bodyRect      = best.boundingBox
-                bodyLocalised = true
-            } else {
-                bodyRect      = nil    // classifier with no mask — no body outline
-                bodyLocalised = false
-            }
-
-            // Prefer eyes > head for sharpness scoring precision
+            let bodyRect = contourBodyRect ?? (isClassifier ? nil : best.boundingBox)
             let bestRect = best.eyeRect ?? best.headRect
             return SubjectResult(
-                bestRect:            bestRect,
-                eyeRect:             best.eyeRect,
-                bodyRect:            bodyRect,
-                bodyRectIsLocalised: bodyLocalised,
-                label:               best.label.capitalized,
-                confidence:          best.confidence
+                bestRect:   bestRect,
+                eyeRect:    best.eyeRect,
+                bodyRect:   bodyRect,
+                contour:    contour,
+                label:      best.label.capitalized,
+                confidence: best.confidence
             )
         }
 
@@ -445,59 +426,45 @@ struct FocusAnalyzer {
         let animal = await animalResult
         let human  = await humanResult
 
-        // For all Vision paths, prefer the mask rect as the body outline.
-        // Vision's own bodyRect from VNRecognizeAnimalsRequest is full-image and
-        // must not be used as an outline (bodyRectIsLocalised = false on that path).
-        func bodyRectFor(visionBodyRect: CGRect?, visionIsLocalised: Bool) -> (CGRect?, Bool) {
-            if let mask = maskRect { return (mask, true) }
-            return (visionBodyRect, visionIsLocalised)
+        // For Vision paths, prefer the contour bbox as bodyRect.
+        // VNRecognizeAnimalsRequest bodyRect is full-image and must not be used.
+        func bodyRect(visionRect: CGRect?, visionIsLocalised: Bool) -> CGRect? {
+            contourBodyRect ?? (visionIsLocalised ? visionRect : nil)
         }
 
         if let eyes = animal.eyeRect, eyes.area > 0.0004 {
-            let (body, localised) = bodyRectFor(visionBodyRect: animal.bodyRect,
-                                                visionIsLocalised: animal.bodyRectIsLocalised)
-            return SubjectResult(bestRect: eyes, eyeRect: eyes, bodyRect: body,
-                                 bodyRectIsLocalised: localised,
+            return SubjectResult(bestRect: eyes, eyeRect: eyes,
+                                 bodyRect: bodyRect(visionRect: animal.bodyRect, visionIsLocalised: true),
+                                 contour: contour,
                                  label: animal.animalLabel, confidence: nil)
         }
         if let head = animal.headRect {
-            let (body, localised) = bodyRectFor(visionBodyRect: animal.bodyRect,
-                                                visionIsLocalised: animal.bodyRectIsLocalised)
-            return SubjectResult(bestRect: head, eyeRect: nil, bodyRect: body,
-                                 bodyRectIsLocalised: localised,
+            return SubjectResult(bestRect: head, eyeRect: nil,
+                                 bodyRect: bodyRect(visionRect: animal.bodyRect, visionIsLocalised: true),
+                                 contour: contour,
                                  label: animal.animalLabel, confidence: nil)
         }
         if let eyes = human.eyeRect, eyes.area > 0.0004 {
-            let (body, localised) = bodyRectFor(visionBodyRect: human.faceRect,
-                                                visionIsLocalised: true)
-            return SubjectResult(bestRect: eyes, eyeRect: eyes, bodyRect: body,
-                                 bodyRectIsLocalised: localised,
+            return SubjectResult(bestRect: eyes, eyeRect: eyes,
+                                 bodyRect: bodyRect(visionRect: human.faceRect, visionIsLocalised: true),
+                                 contour: contour,
                                  label: nil, confidence: nil)
         }
         if let face = human.faceRect {
-            let (body, localised) = bodyRectFor(visionBodyRect: face, visionIsLocalised: true)
-            return SubjectResult(bestRect: face, eyeRect: nil, bodyRect: body,
-                                 bodyRectIsLocalised: localised,
+            return SubjectResult(bestRect: face, eyeRect: nil,
+                                 bodyRect: bodyRect(visionRect: face, visionIsLocalised: true),
+                                 contour: contour,
                                  label: nil, confidence: nil)
-        }
-        if let body = animal.bodyRect, animal.bodyRectIsLocalised {
-            let (finalBody, localised) = bodyRectFor(visionBodyRect: body,
-                                                      visionIsLocalised: true)
-            return SubjectResult(bestRect: body, eyeRect: nil, bodyRect: finalBody,
-                                 bodyRectIsLocalised: localised,
-                                 label: animal.animalLabel, confidence: nil)
         }
 
-        // No animal or human detected by Vision. If the mask fired, we still have
-        // a subject location — use it as both the scoring rect and body outline.
-        if let mask = maskRect {
-            return SubjectResult(bestRect: mask, eyeRect: nil, bodyRect: mask,
-                                 bodyRectIsLocalised: true,
-                                 label: nil, confidence: nil)
+        // No Vision detection. If we have a contour, use its bbox as the subject.
+        if let cbr = contourBodyRect {
+            return SubjectResult(bestRect: cbr, eyeRect: nil, bodyRect: cbr,
+                                 contour: contour, label: nil, confidence: nil)
         }
 
         return SubjectResult(bestRect: nil, eyeRect: nil, bodyRect: nil,
-                             bodyRectIsLocalised: false, label: nil, confidence: nil)
+                             contour: nil, label: nil, confidence: nil)
     }
 
     /// Given a SubjectResult, return the best (most specific) rect and matching region enum.
@@ -506,96 +473,117 @@ struct FocusAnalyzer {
         guard let rect = subject.bestRect else {
             return (CGRect(x: 0, y: 0, width: 1, height: 1), .fullImage)
         }
-        // We can't tell eyes from head here without more context,
-        // so use body-level thresholds for safety (slightly more lenient).
         return (rect, .animalBody)
     }
 
-    // MARK: - Foreground subject mask (iOS 17+)
+    // MARK: - Foreground subject mask contour (iOS 17+)
     //
-    // VNGenerateForegroundInstanceMaskRequest is the same API that powers the
-    // "lift subject" feature in Photos. It finds the salient foreground subject
-    // without needing to know what species it is, returning a pixel mask.
-    // We scan that mask to find the tight bounding box of the masked pixels.
-    //
-    // This is the most reliable way to localise a wildlife subject because it
-    // works on any animal regardless of species, pose, or partial occlusion.
+    // VNGenerateForegroundInstanceMaskRequest is the API behind Photos' "lift subject".
+    // We generate the mask, scale it to a small greyscale image, then run
+    // VNDetectContoursRequest on it to get a clean vector outline of the subject.
+    // The resulting contour points are in normalised 0-1 coords, top-left origin.
 
     @available(iOS 17.0, *)
-    private static func foregroundMaskBodyRect(cgImage: CGImage) async -> CGRect? {
-        return await withCheckedContinuation { (continuation: CheckedContinuation<CGRect?, Never>) in
-            let request = VNGenerateForegroundInstanceMaskRequest()
-            let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
+    private static func foregroundMaskContour(cgImage: CGImage) async -> [CGPoint]? {
+        return await withCheckedContinuation { (continuation: CheckedContinuation<[CGPoint]?, Never>) in
 
-            guard (try? handler.perform([request])) != nil,
-                  let observation = request.results?.first else {
+            // ── Step 1: generate the foreground mask ──────────────────────────
+            let maskRequest = VNGenerateForegroundInstanceMaskRequest()
+            let handler     = VNImageRequestHandler(cgImage: cgImage, options: [:])
+
+            guard (try? handler.perform([maskRequest])) != nil,
+                  let observation = maskRequest.results?.first,
+                  let maskBuffer  = try? observation.generateScaledMaskForImage(
+                      forInstances: observation.allInstances,
+                      from: handler) else {
                 continuation.resume(returning: nil)
                 return
             }
 
-            guard let maskBuffer = try? observation.generateScaledMaskForImage(
-                forInstances: observation.allInstances,
-                from: handler
-            ) else {
-                continuation.resume(returning: nil)
-                return
-            }
-
-            // Lock the pixel buffer and scan for masked pixels
+            // ── Step 2: convert the float32 mask to an 8-bit greyscale CGImage ─
+            // VNDetectContoursRequest needs a CGImage, not a CVPixelBuffer.
+            // We scale down to 256px — enough detail for a clean contour without
+            // being slow to trace.
+            let targetSize = 256
             CVPixelBufferLockBaseAddress(maskBuffer, .readOnly)
-            defer { CVPixelBufferUnlockBaseAddress(maskBuffer, .readOnly) }
-
-            let bufWidth  = CVPixelBufferGetWidth(maskBuffer)
-            let bufHeight = CVPixelBufferGetHeight(maskBuffer)
-
-            guard let baseAddress = CVPixelBufferGetBaseAddress(maskBuffer) else {
+            let bufW  = CVPixelBufferGetWidth(maskBuffer)
+            let bufH  = CVPixelBufferGetHeight(maskBuffer)
+            let bpr   = CVPixelBufferGetBytesPerRow(maskBuffer)
+            guard let base = CVPixelBufferGetBaseAddress(maskBuffer) else {
+                CVPixelBufferUnlockBaseAddress(maskBuffer, .readOnly)
                 continuation.resume(returning: nil)
                 return
             }
+            let floats = base.bindMemory(to: Float32.self, capacity: bufH * bpr / 4)
 
-            let bytesPerRow = CVPixelBufferGetBytesPerRow(maskBuffer)
-            // The mask is a single-channel float32 buffer: 1.0 = foreground, 0.0 = background
-            let floatBuffer = baseAddress.bindMemory(to: Float32.self,
-                                                     capacity: bufHeight * bytesPerRow / 4)
-
-            var minX = bufWidth,  maxX = 0
-            var minY = bufHeight, maxY = 0
-            var foundAny = false
-
-            for row in 0..<bufHeight {
-                let rowBase = row * (bytesPerRow / 4)
-                for col in 0..<bufWidth {
-                    if floatBuffer[rowBase + col] > 0.5 {
-                        if col  < minX { minX = col }
-                        if col  > maxX { maxX = col }
-                        if row  < minY { minY = row }
-                        if row  > maxY { maxY = row }
-                        foundAny = true
-                    }
+            // Build an 8-bit greyscale buffer at targetSize×targetSize
+            var grey = [UInt8](repeating: 0, count: targetSize * targetSize)
+            let scaleX = Double(bufW) / Double(targetSize)
+            let scaleY = Double(bufH) / Double(targetSize)
+            for row in 0..<targetSize {
+                let srcRow = Int(Double(row) * scaleY)
+                for col in 0..<targetSize {
+                    let srcCol  = Int(Double(col) * scaleX)
+                    let fval    = floats[srcRow * (bpr / 4) + srcCol]
+                    grey[row * targetSize + col] = fval > 0.5 ? 255 : 0
                 }
             }
+            CVPixelBufferUnlockBaseAddress(maskBuffer, .readOnly)
 
-            guard foundAny else {
+            guard let greyCtx = CGContext(
+                data: &grey,
+                width: targetSize, height: targetSize,
+                bitsPerComponent: 8, bytesPerRow: targetSize,
+                space: CGColorSpaceCreateDeviceGray(),
+                bitmapInfo: CGImageAlphaInfo.none.rawValue
+            ), let greyImage = greyCtx.makeImage() else {
                 continuation.resume(returning: nil)
                 return
             }
 
-            // Convert pixel coords to normalised 0-1 with a small padding
-            let pad = 0.01
-            let normRect = CGRect(
-                x:      max(0.0, Double(minX) / Double(bufWidth)  - pad),
-                y:      max(0.0, Double(minY) / Double(bufHeight) - pad),
-                width:  min(1.0, Double(maxX - minX) / Double(bufWidth)  + pad * 2),
-                height: min(1.0, Double(maxY - minY) / Double(bufHeight) + pad * 2)
-            )
+            // ── Step 3: run VNDetectContoursRequest on the greyscale mask ─────
+            let contourRequest = VNDetectContoursRequest()
+            contourRequest.detectsDarkOnLight = false   // mask is white-on-black
 
-            // Sanity check — reject if it covers nearly the full image (mask failed)
-            guard normRect.area < 0.90 else {
+            let contourHandler = VNImageRequestHandler(cgImage: greyImage, options: [:])
+            guard (try? contourHandler.perform([contourRequest])) != nil,
+                  let contourObs = contourRequest.results?.first else {
                 continuation.resume(returning: nil)
                 return
             }
 
-            continuation.resume(returning: normRect)
+            // Use the outermost contour (index 0) — this is the subject silhouette.
+            // Inner contours (holes like eye sockets) are children and not needed.
+            guard let outerContour = contourObs.topLevelContours.first else {
+                continuation.resume(returning: nil)
+                return
+            }
+
+            // ── Step 4: convert normalised contour points to top-left origin ──
+            // VNDetectContoursRequest returns points in Vision's bottom-left origin.
+            // We flip Y and downsample to at most 300 points for rendering efficiency.
+            let rawPoints    = outerContour.normalizedPoints
+            let totalPoints  = rawPoints.count
+            let maxPoints    = 300
+            let step         = max(1, totalPoints / maxPoints)
+
+            var result: [CGPoint] = []
+            result.reserveCapacity(min(totalPoints, maxPoints))
+            var i = 0
+            while i < totalPoints {
+                let p = rawPoints[i]
+                result.append(CGPoint(x: CGFloat(p.x), y: 1.0 - CGFloat(p.y)))
+                i += step
+            }
+
+            // Sanity check: reject if the contour bounds cover nearly the full image
+            let bbox = boundingRectWithPadding(result, pad: 0)
+            guard bbox.area < 0.90 else {
+                continuation.resume(returning: nil)
+                return
+            }
+
+            continuation.resume(returning: result.isEmpty ? nil : result)
         }
     }
 
@@ -610,12 +598,10 @@ struct FocusAnalyzer {
     // MARK: - Vision animal detection
 
     private struct AnimalDetectionResult {
-        let eyeRect:             CGRect?
-        let headRect:            CGRect?
-        let bodyRect:            CGRect?
-        /// True for pose-joint-derived rects (tight). False for VNRecognizeAnimalsRequest.
-        let bodyRectIsLocalised: Bool
-        let animalLabel:         String?
+        let eyeRect:     CGRect?
+        let headRect:    CGRect?
+        let bodyRect:    CGRect?
+        let animalLabel: String?
     }
 
     private static func detectAnimalRegion(in cgImage: CGImage) async -> AnimalDetectionResult {
@@ -636,8 +622,7 @@ struct FocusAnalyzer {
                   let observations = request.results,
                   !observations.isEmpty else {
                 continuation.resume(returning: AnimalDetectionResult(
-                    eyeRect: nil, headRect: nil, bodyRect: nil,
-                    bodyRectIsLocalised: false, animalLabel: nil))
+                    eyeRect: nil, headRect: nil, bodyRect: nil, animalLabel: nil))
                 return
             }
 
@@ -672,8 +657,7 @@ struct FocusAnalyzer {
                 .max(by: { $0.confidence < $1.confidence })?.identifier
 
             continuation.resume(returning: AnimalDetectionResult(
-                eyeRect: eyeRect, headRect: headRect, bodyRect: bodyRect,
-                bodyRectIsLocalised: true, animalLabel: label))
+                eyeRect: eyeRect, headRect: headRect, bodyRect: bodyRect, animalLabel: label))
         }
     }
 
@@ -683,8 +667,7 @@ struct FocusAnalyzer {
         try? handler.perform([request])
 
         guard let results = request.results, !results.isEmpty else {
-            return AnimalDetectionResult(eyeRect: nil, headRect: nil, bodyRect: nil,
-                                         bodyRectIsLocalised: false, animalLabel: nil)
+            return AnimalDetectionResult(eyeRect: nil, headRect: nil, bodyRect: nil, animalLabel: nil)
         }
 
         let largest = results.max(by: { $0.boundingBox.area < $1.boundingBox.area })!
@@ -692,8 +675,7 @@ struct FocusAnalyzer {
         let head    = CGRect(x: body.minX, y: body.minY,
                              width: body.width, height: body.height * 0.30)
         let label   = largest.labels.max(by: { $0.confidence < $1.confidence })?.identifier
-        return AnimalDetectionResult(eyeRect: nil, headRect: head, bodyRect: body,
-                                     bodyRectIsLocalised: false, animalLabel: label)
+        return AnimalDetectionResult(eyeRect: nil, headRect: head, bodyRect: body, animalLabel: label)
     }
 
     // MARK: - Vision human detection
@@ -755,7 +737,7 @@ struct FocusAnalyzer {
                                bodyArea: Double = 0,
                                scoringArea: Double = 0,
                                hadAF: Bool = false,
-                               bodyRect: CGRect? = nil) -> FocusResult {
+                               subjectContour: [CGPoint]? = nil) -> FocusResult {
         let w = cgImage.width, h = cgImage.height
         guard w > 2 && h > 2 else { return unanalyzed() }
 
@@ -820,7 +802,7 @@ struct FocusAnalyzer {
         return FocusResult(status: status, score: finalScore, analysisRegion: region,
                            blurType: blurType, subjectSizeConfidence: sizeConfidence,
                            detectedAnimalLabel: animalLabel, analysisRect: analysisRect,
-                           subjectBodyRect: bodyRect,
+                           subjectContour: subjectContour,
                            detectionConfidence: detectionConfidence,
                            afOverlapsSubject: afOverlapsSubject,
                            afOnEye: afOnEye,
@@ -919,7 +901,7 @@ struct FocusAnalyzer {
         FocusResult(status: .unanalyzed, score: 0, analysisRegion: .fullImage,
                     blurType: .unknown, subjectSizeConfidence: 0,
                     detectedAnimalLabel: nil, analysisRect: nil,
-                    subjectBodyRect: nil,
+                    subjectContour: nil,
                     detectionConfidence: nil, afOverlapsSubject: nil,
                     afOnEye: nil,
                     rawSharpnessScore: 0, subjectBodyArea: 0, scoringRectArea: 0,

@@ -117,7 +117,7 @@ struct RAWFileDetailView: View {
                                     region: file.focusRegion,
                                     scale: scale,
                                     offset: offset,
-                                    subjectBodyRect: file.subjectBodyRect,
+                                    subjectContour: file.subjectContour,
                                     detectedLabel: file.detectedAnimalLabel
                                 )
                             }

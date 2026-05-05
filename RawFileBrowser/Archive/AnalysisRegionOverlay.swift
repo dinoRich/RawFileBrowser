@@ -11,6 +11,10 @@ struct AnalysisRegionOverlay: View {
     let region: FocusResult.AnalysisRegion
     let scale: CGFloat
     var offset: CGSize = .zero
+    /// Optional tight body rect from the foreground mask / YOLO detector.
+    var subjectBodyRect: CGRect? = nil
+    /// Species or subject label to show on the body outline (e.g. "Robin").
+    var detectedLabel: String? = nil
 
     /// Compute the actual pixel rect of the image inside the container,
     /// accounting for letterbox bars added by scaledToFit.
@@ -36,6 +40,12 @@ struct AnalysisRegionOverlay: View {
         imageFrame.projectedToScreen(normRect: normRect, scale: scale, offset: offset)
     }
 
+    /// Screen-space rect for the full subject body outline, if available.
+    private var bodyScreenRect: CGRect? {
+        guard let normBody = subjectBodyRect else { return nil }
+        return imageFrame.projectedToScreen(normRect: normBody, scale: scale, offset: offset)
+    }
+
     private var overlayColor: Color {
         switch region {
         case .animalEyes, .humanEyes:  return .green
@@ -49,7 +59,34 @@ struct AnalysisRegionOverlay: View {
     var body: some View {
         let r = screenRect
         ZStack(alignment: .topLeading) {
-            // Dashed border
+
+            // ── Full subject body outline ─────────────────────────────────────
+            // Drawn first so it sits visually behind the scoring rect.
+            if let b = bodyScreenRect {
+                Rectangle()
+                    .strokeBorder(
+                        overlayColor.opacity(0.55),
+                        style: StrokeStyle(lineWidth: 1.5, dash: [4, 4])
+                    )
+                    .frame(width: b.width, height: b.height)
+                    .offset(x: b.minX, y: b.minY)
+
+                if let label = detectedLabel {
+                    Text(label)
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(overlayColor.opacity(0.85))
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 2)
+                        .background(.black.opacity(0.55))
+                        .clipShape(RoundedRectangle(cornerRadius: 3))
+                        .offset(
+                            x: b.minX,
+                            y: min(b.maxY + 2, containerSize.height - 20)
+                        )
+                }
+            }
+
+            // ── Scoring region (eyes / head / AF point) ───────────────────────
             Rectangle()
                 .strokeBorder(
                     overlayColor,
@@ -58,10 +95,8 @@ struct AnalysisRegionOverlay: View {
                 .frame(width: r.width, height: r.height)
                 .offset(x: r.minX, y: r.minY)
 
-            // Corner marks for clarity
             CornerMarks(rect: r, color: overlayColor, size: 10)
 
-            // Label
             Text(region.rawValue)
                 .font(.system(size: 10, weight: .semibold))
                 .foregroundStyle(overlayColor)
@@ -74,7 +109,7 @@ struct AnalysisRegionOverlay: View {
                     y: max(0, r.minY - 18)
                 )
         }
-        .allowsHitTesting(false)  // Don't intercept touch gestures
+        .allowsHitTesting(false)
     }
 }
 
