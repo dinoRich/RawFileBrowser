@@ -58,9 +58,31 @@ struct FocusDiagnosticView: View {
 
                     // ── Sharpness numbers ────────────────────────────────────
                     DiagSection(title: "Sharpness Scores", icon: "waveform.path.ecg") {
+
+                        DiagRow("Rating basis",
+                                value: file.ratingBasis.rawValue,
+                                highlight: ratingBasisColor(file.ratingBasis))
+
+                        // Case 5 dual scores — show both when available
+                        if let afRaw = file.afPointRawScore, let subRaw = file.subjectBodyRawScore {
+                            DiagRow("AF point score (raw)",
+                                    value: pct(afRaw),
+                                    detail: "Laplacian at AF point rect",
+                                    highlight: scoreColor(afRaw,
+                                                          sharp: file.sharpThreshold,
+                                                          ok: file.acceptableThreshold))
+                            DiagRow("Subject body score (raw)",
+                                    value: pct(subRaw),
+                                    detail: "Laplacian at subject body rect",
+                                    highlight: scoreColor(subRaw,
+                                                          sharp: file.sharpThreshold,
+                                                          ok: file.acceptableThreshold))
+                            Divider()
+                        }
+
                         DiagRow("Raw Laplacian score",
                                 value: pct(file.rawSharpnessScore),
-                                detail: "variance before size penalty",
+                                detail: "score used for rating (before size penalty)",
                                 highlight: scoreColor(file.rawSharpnessScore,
                                                       sharp: file.sharpThreshold,
                                                       ok: file.acceptableThreshold))
@@ -165,11 +187,25 @@ struct FocusDiagnosticView: View {
     private func branchDescription(_ file: RAWFile) -> String {
         switch (file.hadAFPoint, file.detectedAnimalLabel != nil || isHuman(file)) {
         case (true, true):
-            if file.focusStatus == .missedFocus { return "AF + Subject → Missed Focus" }
-            return "AF + Subject → Score at AF point"
+            switch file.focusStatus {
+            case .missedFocus:        return "AF + Subject → Missed Focus (Case 3)"
+            case .possibleMissedFocus: return "AF + Subject → Possible Missed Focus (Case 4)"
+            default:                  return "AF + Subject → AF on Subject (Case 5)"
+            }
         case (true, false):  return "AF only → Score at AF point"
-        case (false, true):  return "Subject only → Score at subject"
-        case (false, false): return "No AF, no subject → Full image"
+        case (false, true):  return "Subject only → Score at subject body (Case 2)"
+        case (false, false): return "No AF, no subject → Full image (Case 1)"
+        }
+    }
+
+    private func ratingBasisColor(_ basis: FocusResult.RatingBasis) -> Color {
+        switch basis {
+        case .afPoint:         return .green
+        case .subjectBody:     return .primary
+        case .afPointDegraded: return .orange
+        case .fullImage:       return .secondary
+        case .missedFocus:     return .purple
+        case .possibleMissed:  return .indigo
         }
     }
 
@@ -268,7 +304,7 @@ private struct ThresholdGuideCard: View {
                             .offset(x: geo.size.width * CGFloat(file.sharpThreshold) - 1)
                     }
 
-                    // Score needle
+                    // Score needle — primary (the rating score)
                     if file.focusScore > 0 {
                         ZStack {
                             Circle()
@@ -280,6 +316,20 @@ private struct ThresholdGuideCard: View {
                         }
                         .offset(x: geo.size.width * CGFloat(min(file.focusScore, 1.0)) - 10,
                                 y: 4)
+                    }
+
+                    // Second needle — AF point raw score (Case 5 only)
+                    if let afRaw = file.afPointRawScore, afRaw > 0 {
+                        ZStack {
+                            Diamond()
+                                .fill(Color.cyan.opacity(0.85))
+                                .frame(width: 16, height: 16)
+                            Diamond()
+                                .fill(.white)
+                                .frame(width: 6, height: 6)
+                        }
+                        .offset(x: geo.size.width * CGFloat(min(afRaw, 1.0)) - 8,
+                                y: -16)
                     }
                 }
             }
@@ -298,6 +348,21 @@ private struct ThresholdGuideCard: View {
                 }
                 Spacer()
                 Text("100%").font(.caption2).foregroundStyle(.secondary)
+            }
+
+            // Dual-score legend (Case 5 only)
+            if file.afPointRawScore != nil {
+                HStack(spacing: 12) {
+                    HStack(spacing: 4) {
+                        Circle().fill(Color(file.focusStatus.color)).frame(width: 10, height: 10)
+                        Text("Rating score").font(.caption2).foregroundStyle(.secondary)
+                    }
+                    HStack(spacing: 4) {
+                        Diamond().fill(Color.cyan.opacity(0.85)).frame(width: 10, height: 10)
+                        Text("AF point raw score").font(.caption2).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                }
             }
 
             if file.sharpThreshold > 0 {
@@ -434,5 +499,19 @@ private struct DiagRow: View {
 
             Divider().padding(.leading, 14)
         }
+    }
+}
+
+// MARK: - Diamond shape (used as second needle on the score scale for Case 5 AF point score)
+
+private struct Diamond: Shape {
+    func path(in rect: CGRect) -> Path {
+        var p = Path()
+        p.move(to:    CGPoint(x: rect.midX, y: rect.minY))
+        p.addLine(to: CGPoint(x: rect.maxX, y: rect.midY))
+        p.addLine(to: CGPoint(x: rect.midX, y: rect.maxY))
+        p.addLine(to: CGPoint(x: rect.minX, y: rect.midY))
+        p.closeSubpath()
+        return p
     }
 }

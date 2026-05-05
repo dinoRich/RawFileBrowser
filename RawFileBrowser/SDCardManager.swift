@@ -45,6 +45,12 @@ struct RAWFile: Identifiable {
     var hadAFPoint: Bool = false
     var sharpThreshold: Double = 0
     var acceptableThreshold: Double = 0
+    /// Raw Laplacian score at the AF point rect (Case 5 only — nil otherwise)
+    var afPointRawScore: Double? = nil
+    /// Raw Laplacian score at the subject body rect (Case 5 only — nil otherwise)
+    var subjectBodyRawScore: Double? = nil
+    /// Which region drove the final rating
+    var ratingBasis: FocusResult.RatingBasis = .fullImage
     var xmpWritten: Bool = false
     var isRejected: Bool { focusStatus.isRejected }
 }
@@ -176,6 +182,9 @@ final class SDCardManager: ObservableObject {
                     rawFiles[i].hadAFPoint            = result.hadAFPoint
                     rawFiles[i].sharpThreshold        = result.sharpThreshold
                     rawFiles[i].acceptableThreshold   = result.acceptableThreshold
+                    rawFiles[i].afPointRawScore       = result.afPointRawScore
+                    rawFiles[i].subjectBodyRawScore   = result.subjectBodyRawScore
+                    rawFiles[i].ratingBasis           = result.ratingBasis
                 }
             }
 
@@ -205,6 +214,9 @@ final class SDCardManager: ObservableObject {
         rawFiles[idx].hadAFPoint            = result.hadAFPoint
         rawFiles[idx].sharpThreshold        = result.sharpThreshold
         rawFiles[idx].acceptableThreshold   = result.acceptableThreshold
+        rawFiles[idx].afPointRawScore       = result.afPointRawScore
+        rawFiles[idx].subjectBodyRawScore   = result.subjectBodyRawScore
+        rawFiles[idx].ratingBasis           = result.ratingBasis
     }
 
     var rejectedCount: Int { rawFiles.filter(\.isRejected).count }

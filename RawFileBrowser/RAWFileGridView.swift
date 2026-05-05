@@ -15,11 +15,12 @@ struct RAWFileGridView: View {
     }
 
     enum FilterMode: String, CaseIterable {
-        case all         = "All"
-        case sharp       = "Sharp"
-        case rejected    = "Rejected"
-        case missedFocus = "Missed Focus"
-        case unanalyzed  = "Unanalyzed"
+        case all                = "All"
+        case sharp              = "Sharp"
+        case rejected           = "Rejected"
+        case missedFocus        = "Missed Focus"
+        case possibleMissedFocus = "Possible Missed"
+        case unanalyzed         = "Unanalyzed"
     }
 
     private var filteredFiles: [RAWFile] {
@@ -33,10 +34,11 @@ struct RAWFileGridView: View {
         // Filter
         switch filterMode {
         case .all: break
-        case .sharp:       files = files.filter { $0.focusStatus == .sharp }
-        case .rejected:    files = files.filter { $0.isRejected }
-        case .missedFocus: files = files.filter { $0.focusStatus == .missedFocus }
-        case .unanalyzed:  files = files.filter { $0.focusStatus == .unanalyzed }
+        case .sharp:               files = files.filter { $0.focusStatus == .sharp }
+        case .rejected:            files = files.filter { $0.isRejected }
+        case .missedFocus:         files = files.filter { $0.focusStatus == .missedFocus }
+        case .possibleMissedFocus: files = files.filter { $0.focusStatus == .possibleMissedFocus }
+        case .unanalyzed:          files = files.filter { $0.focusStatus == .unanalyzed }
         }
 
         // Sort
