@@ -181,30 +181,31 @@ struct FocusAnalyzer {
         // ── AF + Subject ──────────────────────────────────────────────────────
         case (true, true):
             let af = afRect!
-            // Expand the AF rect before testing overlap.
-            // AF point rects parsed from Makernote are often very small (e.g. 163×163 px
-            // in a 6960-wide sensor → ~2.3% of image width as normalised coords).
-            // Subject bboxes from Vision are also approximate.
-            // A generous expansion prevents false "missed focus" calls.
-            // Use the subject BODY rect (full silhouette) for overlap, not the
-            // precision-scoring rect (eyes/head). An AF point on a bird's wing is
-            // still on the subject even though it misses the tiny eye crop.
             let subjectBody = subject.bodyRect ?? subject.bestRect!
 
-            // Pad the AF rect by a fixed 10% of image in each direction.
-            // Relative expansion (e.g. 3× af.width) breaks when the AF rect is tiny.
-            let expandedAF = af.insetBy(
-                dx: -Threshold.afPaddingForOverlap,
-                dy: -Threshold.afPaddingForOverlap
-            ).clamped(to: CGRect(x: 0, y: 0, width: 1, height: 1))
-
-            let overlaps = expandedAF.intersects(subjectBody)
-
             // Check whether the AF point specifically covered the eye region.
-            // We use the raw (un-expanded) AF rect here — if the camera was
-            // accurate enough to hit the eye, we want to know; generous expansion
-            // would make almost every shot look like an eye hit.
             let afOnEye = afCoversEye(afRect: af, eyeRect: subject.eyeRect)
+
+            // Overlap test: use the subject contour when available (more accurate than
+            // a bounding box for irregular shapes — a bird's gap between wing and body,
+            // an animal partially behind a branch, etc.).
+            // Fall back to the padded rect test when no contour is present.
+            let overlaps: Bool
+            if let contour = subject.contour, !contour.isEmpty {
+                // Contour geometry is accurate — test the AF rect directly against it.
+                // No padding needed: the contour already traces the true subject edge.
+                overlaps = afOverlapsContour(afRect: af, contour: contour)
+                print("FocusAnalyzer: contour overlap test → \(overlaps)")
+            } else {
+                // No contour — expand the AF rect to compensate for bbox imprecision.
+                // AF point rects from Makernote are often very small (~2.3% of image width).
+                let expandedAF = af.insetBy(
+                    dx: -Threshold.afPaddingForOverlap,
+                    dy: -Threshold.afPaddingForOverlap
+                ).clamped(to: CGRect(x: 0, y: 0, width: 1, height: 1))
+                overlaps = expandedAF.intersects(subjectBody)
+                print("FocusAnalyzer: bbox overlap test → \(overlaps)")
+            }
 
             if overlaps {
                 // AF landed on the subject — score sharpness at the AF point itself
@@ -879,6 +880,43 @@ struct FocusAnalyzer {
             width:  norm.width  * CGFloat(image.width),
             height: norm.height * CGFloat(image.height)
         ))
+    }
+
+    // MARK: - Point-in-polygon (ray casting)
+    //
+    // Tests whether a point lies inside a polygon defined by an array of vertices,
+    // using the ray casting algorithm. Works correctly for concave polygons (e.g. a
+    // bird with outstretched wings) and runs in O(n) time.
+
+    private static func pointInPolygon(_ point: CGPoint, polygon: [CGPoint]) -> Bool {
+        guard polygon.count > 2 else { return false }
+        var inside = false
+        var j = polygon.count - 1
+        for i in 0..<polygon.count {
+            let xi = polygon[i].x, yi = polygon[i].y
+            let xj = polygon[j].x, yj = polygon[j].y
+            let intersects = ((yi > point.y) != (yj > point.y)) &&
+                             (point.x < (xj - xi) * (point.y - yi) / (yj - yi) + xi)
+            if intersects { inside = !inside }
+            j = i
+        }
+        return inside
+    }
+
+    /// Tests whether an AF rect overlaps a subject contour.
+    /// Uses the AF rect centre as the test point — more accurate than rect-vs-bbox
+    /// for irregular shapes (a bird's wing gap, an animal behind foliage).
+    /// Also tests the four corners of the AF rect in case the centre misses but an
+    /// edge overlaps the subject (e.g. AF rect straddles the subject boundary).
+    private static func afOverlapsContour(afRect: CGRect, contour: [CGPoint]) -> Bool {
+        let testPoints = [
+            CGPoint(x: afRect.midX, y: afRect.midY),           // centre
+            CGPoint(x: afRect.minX, y: afRect.minY),           // top-left
+            CGPoint(x: afRect.maxX, y: afRect.minY),           // top-right
+            CGPoint(x: afRect.minX, y: afRect.maxY),           // bottom-left
+            CGPoint(x: afRect.maxX, y: afRect.maxY),           // bottom-right
+        ]
+        return testPoints.contains { pointInPolygon($0, polygon: contour) }
     }
 
     private static func loadThumbnail(from url: URL, maxDimension: Int) -> CGImage? {
