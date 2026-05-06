@@ -59,10 +59,10 @@ struct FocusResult {
     let detectedAnimalLabel: String?
     /// Normalised (0-1) rect of the analysed region, top-left origin.
     let analysisRect: CGRect?
-    /// Normalised (0-1) contour points tracing the subject silhouette.
+    /// Normalised (0-1) contour points tracing each detected subject's silhouette.
     /// Derived from VNGenerateForegroundInstanceMaskRequest — the same API used
-    /// by Photos' "lift subject". nil when no subject was localised.
-    let subjectContour: [CGPoint]?
+    /// by Photos' "lift subject". Empty when no subject was localised.
+    let subjectContour: [[CGPoint]]
     /// Detection confidence from YOLO (0-1), nil if Vision fallback was used
     let detectionConfidence: Float?
     /// Whether the AF point overlapped the detected subject.
@@ -150,7 +150,7 @@ private enum Threshold {
     /// Absolute padding (normalised 0-1) added to the AF rect before overlap test.
     /// 0.10 = 10% of image dimension on each side — intentionally generous because
     /// AF point rects are tiny and Vision body boxes are approximate.
-    static let afPaddingForOverlap: CGFloat = 0.10
+    static let afPaddingForOverlap: CGFloat = 0
 }
 
 // MARK: - FocusAnalyzer
@@ -227,7 +227,24 @@ struct FocusAnalyzer {
                 dy: -Threshold.afPaddingForOverlap
             ).clamped(to: CGRect(x: 0, y: 0, width: 1, height: 1))
 
-            let overlaps = expandedAF.intersects(subjectBody)
+            let overlaps: Bool
+            if !subject.contours.isEmpty {
+                // Test centre + all four corners against each subject's contour.
+                // If any sample point is inside any contour, the AF bracket
+                // meaningfully covers at least one subject.
+                let samples = [
+                    CGPoint(x: expandedAF.midX, y: expandedAF.midY),
+                    CGPoint(x: expandedAF.minX, y: expandedAF.minY),
+                    CGPoint(x: expandedAF.maxX, y: expandedAF.minY),
+                    CGPoint(x: expandedAF.minX, y: expandedAF.maxY),
+                    CGPoint(x: expandedAF.maxX, y: expandedAF.maxY),
+                ]
+                overlaps = subject.contours.contains { contour in
+                    contour.count >= 3 && samples.contains { contourContainsPoint(contour, point: $0) }
+                }
+            } else {
+                overlaps = expandedAF.intersects(subjectBody)
+            }
             let afOnEye  = afCoversEye(afRect: af, eyeRect: subject.eyeRect)
 
             if overlaps {
@@ -247,7 +264,7 @@ struct FocusAnalyzer {
                                          label: subject.label,
                                          confidence: subject.confidence,
                                          afOnEye: afOnEye,
-                                         subjectContour: subject.contour)
+                                         subjectContour: subject.contours)
             }
 
         // ── AF only (no subject detected) ────────────────────────────────────
@@ -273,7 +290,7 @@ struct FocusAnalyzer {
                                confidence: subject.confidence,
                                afOverlaps: nil,
                                bodyRect: bodyRect,        // pass the resolved rect, never nil
-                               subjectContour: subject.contour,
+                               subjectContour: subject.contours,
                                ratingBasis: .subjectBody)
 
         // ── Case 1: No AF, no subject ─────────────────────────────────────────
@@ -371,7 +388,7 @@ struct FocusAnalyzer {
                            subjectSizeConfidence: bodySizeConf,
                            detectedAnimalLabel: subject.label,
                            analysisRect: afRect,          // always show AF point rect in overlay
-                           subjectContour: subject.contour,
+                           subjectContour: subject.contours,
                            detectionConfidence: subject.confidence,
                            afOverlapsSubject: true,
                            afOnEye: afOnEye,
@@ -430,7 +447,24 @@ struct FocusAnalyzer {
             .clamped(to: CGRect(x: 0, y: 0, width: 1, height: 1))
         return expandedAF.intersects(eye)
     }
-
+    
+    /// Returns true if the given point lies inside the polygon defined by contour points.
+    /// Uses the ray-casting algorithm — works for any simple (non-self-intersecting) polygon.
+    private static func contourContainsPoint(_ contour: [CGPoint], point: CGPoint) -> Bool {
+        var inside = false
+        var j = contour.count - 1
+        for i in 0..<contour.count {
+            let xi = contour[i].x, yi = contour[i].y
+            let xj = contour[j].x, yj = contour[j].y
+            if ((yi > point.y) != (yj > point.y)) &&
+                (point.x < (xj - xi) * (point.y - yi) / (yj - yi) + xi) {
+                inside.toggle()
+            }
+            j = i
+        }
+        return inside
+    }
+    
     // MARK: - Cases 3 & 4: AF not on subject
 
     /// AF point found but does NOT overlap the subject.
@@ -443,7 +477,7 @@ struct FocusAnalyzer {
                                            label: String?,
                                            confidence: Float?,
                                            afOnEye: Bool? = nil,
-                                           subjectContour: [CGPoint]? = nil) -> FocusResult {
+                                           subjectContour: [[CGPoint]] = []) -> FocusResult {
 
         let sizeConf   = subjectSizeConfidence(rect: subjectRect,
                                                imageWidth: cgImage.width,
@@ -483,7 +517,7 @@ struct FocusAnalyzer {
             blurType:              finalScore < thresholds.acceptable ? .defocus : .mixed,
             subjectSizeConfidence: sizeConf,
             detectedAnimalLabel:   label,
-            analysisRect:          subjectRect,
+            analysisRect:          afRect,
             subjectContour:        subjectContour,
             detectionConfidence:   confidence,
             afOverlapsSubject:     false,
@@ -511,7 +545,7 @@ struct FocusAnalyzer {
                                      afOnEye: Bool? = nil,
                                      bodyRect: CGRect? = nil,
                                      hadAF: Bool = false,
-                                     subjectContour: [CGPoint]? = nil,
+                                     subjectContour: [[CGPoint]] = [],
                                      ratingBasis: FocusResult.RatingBasis = .subjectBody) -> FocusResult {
         let sizeConf = subjectSizeConfidence(rect: bodyRect ?? normRect,
                                              imageWidth: cgImage.width,
@@ -570,9 +604,9 @@ struct FocusAnalyzer {
         let eyeRect:    CGRect?
         /// The subject's full body rect (used for overlap checking against AF point)
         let bodyRect:   CGRect?
-        /// Normalised contour points from VNGenerateForegroundInstanceMaskRequest.
-        /// Used to draw the subject silhouette overlay. nil when unavailable.
-        let contour:    [CGPoint]?
+        /// One contour per detected subject instance from VNGenerateForegroundInstanceMaskRequest.
+        /// Used to draw the subject silhouette overlay. Empty when unavailable.
+        let contours:   [[CGPoint]]
         let label:      String?
         let confidence: Float?
     }
@@ -580,20 +614,20 @@ struct FocusAnalyzer {
     private static func detectSubject(in cgImage: CGImage) async -> SubjectResult {
 
         // Run foreground mask contour and YOLO concurrently — independent operations.
-        async let contourTask: [CGPoint]? = {
+        async let contourTask: [[CGPoint]] = {
             if #available(iOS 17.0, *) {
                 return await foregroundMaskContour(cgImage: cgImage)
             }
-            return nil
+            return []
         }()
         async let yoloTask = YOLODetector.shared.detect(cgImage: cgImage)
 
-        let contour        = await contourTask
+        let contours       = await contourTask
         let yoloDetections = await yoloTask
 
-        // Bounding rect of the contour — used for overlap testing and size confidence.
-        // Falls back to nil when no contour was found.
-        let contourBodyRect: CGRect? = contour.map { boundingRectWithPadding($0, pad: 0.005) }
+        // Bounding rect of all contours combined — used for overlap testing and size confidence.
+        let allContourPoints = contours.flatMap { $0 }
+        let contourBodyRect: CGRect? = allContourPoints.isEmpty ? nil : boundingRectWithPadding(allContourPoints, pad: 0.005)
 
         if let best = bestAnimalDetection(from: yoloDetections) {
             // YOLO identified the species. Use the contour bbox as bodyRect when
@@ -606,7 +640,7 @@ struct FocusAnalyzer {
                 bestRect:   bestRect,
                 eyeRect:    best.eyeRect,
                 bodyRect:   bodyRect,
-                contour:    contour,
+                contours:   contours,
                 label:      best.label.capitalized,
                 confidence: best.confidence
             )
@@ -627,36 +661,36 @@ struct FocusAnalyzer {
         if let eyes = animal.eyeRect, eyes.area > 0.0004 {
             return SubjectResult(bestRect: eyes, eyeRect: eyes,
                                  bodyRect: bodyRect(visionRect: animal.bodyRect, visionIsLocalised: true),
-                                 contour: contour,
+                                 contours: contours,
                                  label: animal.animalLabel, confidence: nil)
         }
         if let head = animal.headRect {
             return SubjectResult(bestRect: head, eyeRect: nil,
                                  bodyRect: bodyRect(visionRect: animal.bodyRect, visionIsLocalised: true),
-                                 contour: contour,
+                                 contours: contours,
                                  label: animal.animalLabel, confidence: nil)
         }
         if let eyes = human.eyeRect, eyes.area > 0.0004 {
             return SubjectResult(bestRect: eyes, eyeRect: eyes,
                                  bodyRect: bodyRect(visionRect: human.faceRect, visionIsLocalised: true),
-                                 contour: contour,
+                                 contours: contours,
                                  label: nil, confidence: nil)
         }
         if let face = human.faceRect {
             return SubjectResult(bestRect: face, eyeRect: nil,
                                  bodyRect: bodyRect(visionRect: face, visionIsLocalised: true),
-                                 contour: contour,
+                                 contours: contours,
                                  label: nil, confidence: nil)
         }
 
         // No Vision detection. If we have a contour, use its bbox as the subject.
         if let cbr = contourBodyRect {
             return SubjectResult(bestRect: cbr, eyeRect: nil, bodyRect: cbr,
-                                 contour: contour, label: nil, confidence: nil)
+                                 contours: contours, label: nil, confidence: nil)
         }
 
         return SubjectResult(bestRect: nil, eyeRect: nil, bodyRect: nil,
-                             contour: nil, label: nil, confidence: nil)
+                             contours: [], label: nil, confidence: nil)
     }
 
     // MARK: - Foreground subject mask contour (iOS 17+)
@@ -667,106 +701,92 @@ struct FocusAnalyzer {
     // The resulting contour points are in normalised 0-1 coords, top-left origin.
 
     @available(iOS 17.0, *)
-    private static func foregroundMaskContour(cgImage: CGImage) async -> [CGPoint]? {
-        return await withCheckedContinuation { (continuation: CheckedContinuation<[CGPoint]?, Never>) in
+    private static func foregroundMaskContour(cgImage: CGImage) async -> [[CGPoint]] {
+        return await withCheckedContinuation { (continuation: CheckedContinuation<[[CGPoint]], Never>) in
 
-            // ── Step 1: generate the foreground mask ──────────────────────────
+            // ── Step 1: generate the foreground instance mask ─────────────────
+            // VNGenerateForegroundInstanceMaskRequest assigns a distinct pixel value
+            // to each foreground instance (1, 2, 3 …). We process each instance
+            // separately so we get one contour per subject rather than one merged blob.
             let maskRequest = VNGenerateForegroundInstanceMaskRequest()
             let handler     = VNImageRequestHandler(cgImage: cgImage, options: [:])
 
             guard (try? handler.perform([maskRequest])) != nil,
                   let observation = maskRequest.results?.first,
-                  let maskBuffer  = try? observation.generateScaledMaskForImage(
-                      forInstances: observation.allInstances,
-                      from: handler) else {
-                continuation.resume(returning: nil)
+                  !observation.allInstances.isEmpty else {
+                continuation.resume(returning: [])
                 return
             }
 
-            // ── Step 2: convert the float32 mask to an 8-bit greyscale CGImage ─
-            // VNDetectContoursRequest needs a CGImage, not a CVPixelBuffer.
-            // We scale down to 256px — enough detail for a clean contour without
-            // being slow to trace.
             let targetSize = 256
-            CVPixelBufferLockBaseAddress(maskBuffer, .readOnly)
-            let bufW  = CVPixelBufferGetWidth(maskBuffer)
-            let bufH  = CVPixelBufferGetHeight(maskBuffer)
-            let bpr   = CVPixelBufferGetBytesPerRow(maskBuffer)
-            guard let base = CVPixelBufferGetBaseAddress(maskBuffer) else {
-                CVPixelBufferUnlockBaseAddress(maskBuffer, .readOnly)
-                continuation.resume(returning: nil)
-                return
-            }
-            let floats = base.bindMemory(to: Float32.self, capacity: bufH * bpr / 4)
+            var allContours: [[CGPoint]] = []
 
-            // Build an 8-bit greyscale buffer at targetSize×targetSize
-            var grey = [UInt8](repeating: 0, count: targetSize * targetSize)
-            let scaleX = Double(bufW) / Double(targetSize)
-            let scaleY = Double(bufH) / Double(targetSize)
-            for row in 0..<targetSize {
-                let srcRow = Int(Double(row) * scaleY)
-                for col in 0..<targetSize {
-                    let srcCol  = Int(Double(col) * scaleX)
-                    let fval    = floats[srcRow * (bpr / 4) + srcCol]
-                    grey[row * targetSize + col] = fval > 0.5 ? 255 : 0
+            // ── Step 2: process each instance individually ────────────────────
+            for instance in observation.allInstances {
+                guard let maskBuffer = try? observation.generateScaledMaskForImage(
+                    forInstances: IndexSet(integer: Int(instance)),
+                    from: handler) else { continue }
+
+                CVPixelBufferLockBaseAddress(maskBuffer, .readOnly)
+                let bufW = CVPixelBufferGetWidth(maskBuffer)
+                let bufH = CVPixelBufferGetHeight(maskBuffer)
+                let bpr  = CVPixelBufferGetBytesPerRow(maskBuffer)
+                guard let base = CVPixelBufferGetBaseAddress(maskBuffer) else {
+                    CVPixelBufferUnlockBaseAddress(maskBuffer, .readOnly)
+                    continue
                 }
-            }
-            CVPixelBufferUnlockBaseAddress(maskBuffer, .readOnly)
+                let floats = base.bindMemory(to: Float32.self, capacity: bufH * bpr / 4)
 
-            guard let greyCtx = CGContext(
-                data: &grey,
-                width: targetSize, height: targetSize,
-                bitsPerComponent: 8, bytesPerRow: targetSize,
-                space: CGColorSpaceCreateDeviceGray(),
-                bitmapInfo: CGImageAlphaInfo.none.rawValue
-            ), let greyImage = greyCtx.makeImage() else {
-                continuation.resume(returning: nil)
-                return
-            }
+                // Build an 8-bit greyscale buffer at targetSize×targetSize
+                var grey = [UInt8](repeating: 0, count: targetSize * targetSize)
+                let scaleX = Double(bufW) / Double(targetSize)
+                let scaleY = Double(bufH) / Double(targetSize)
+                for row in 0..<targetSize {
+                    let srcRow = Int(Double(row) * scaleY)
+                    for col in 0..<targetSize {
+                        let srcCol = Int(Double(col) * scaleX)
+                        let fval   = floats[srcRow * (bpr / 4) + srcCol]
+                        grey[row * targetSize + col] = fval > 0.5 ? 255 : 0
+                    }
+                }
+                CVPixelBufferUnlockBaseAddress(maskBuffer, .readOnly)
 
-            // ── Step 3: run VNDetectContoursRequest on the greyscale mask ─────
-            let contourRequest = VNDetectContoursRequest()
-            contourRequest.detectsDarkOnLight = false   // mask is white-on-black
+                guard let greyCtx = CGContext(
+                    data: &grey, width: targetSize, height: targetSize,
+                    bitsPerComponent: 8, bytesPerRow: targetSize,
+                    space: CGColorSpaceCreateDeviceGray(),
+                    bitmapInfo: CGImageAlphaInfo.none.rawValue
+                ), let greyImage = greyCtx.makeImage() else { continue }
 
-            let contourHandler = VNImageRequestHandler(cgImage: greyImage, options: [:])
-            guard (try? contourHandler.perform([contourRequest])) != nil,
-                  let contourObs = contourRequest.results?.first else {
-                continuation.resume(returning: nil)
-                return
-            }
+                // ── Step 3: trace contour on this instance's mask ─────────────
+                let contourRequest = VNDetectContoursRequest()
+                contourRequest.detectsDarkOnLight = false   // mask is white-on-black
+                let contourHandler = VNImageRequestHandler(cgImage: greyImage, options: [:])
+                guard (try? contourHandler.perform([contourRequest])) != nil,
+                      let contourObs = contourRequest.results?.first,
+                      let outerContour = contourObs.topLevelContours.first else { continue }
 
-            // Use the outermost contour (index 0) — this is the subject silhouette.
-            // Inner contours (holes like eye sockets) are children and not needed.
-            guard let outerContour = contourObs.topLevelContours.first else {
-                continuation.resume(returning: nil)
-                return
-            }
+                // ── Step 4: convert to top-left origin, downsample to ≤300 pts ─
+                let rawPoints   = outerContour.normalizedPoints
+                let totalPoints = rawPoints.count
+                let step        = max(1, totalPoints / 300)
+                var result: [CGPoint] = []
+                result.reserveCapacity(min(totalPoints, 300))
+                var i = 0
+                while i < totalPoints {
+                    let p = rawPoints[i]
+                    result.append(CGPoint(x: CGFloat(p.x), y: 1.0 - CGFloat(p.y)))
+                    i += step
+                }
 
-            // ── Step 4: convert normalised contour points to top-left origin ──
-            // VNDetectContoursRequest returns points in Vision's bottom-left origin.
-            // We flip Y and downsample to at most 300 points for rendering efficiency.
-            let rawPoints    = outerContour.normalizedPoints
-            let totalPoints  = rawPoints.count
-            let maxPoints    = 300
-            let step         = max(1, totalPoints / maxPoints)
+                // Sanity check: reject if contour covers nearly the full image
+                let bbox = boundingRectWithPadding(result, pad: 0)
+                guard !result.isEmpty, bbox.area < 0.90 else { continue }
 
-            var result: [CGPoint] = []
-            result.reserveCapacity(min(totalPoints, maxPoints))
-            var i = 0
-            while i < totalPoints {
-                let p = rawPoints[i]
-                result.append(CGPoint(x: CGFloat(p.x), y: 1.0 - CGFloat(p.y)))
-                i += step
-            }
-
-            // Sanity check: reject if the contour bounds cover nearly the full image
-            let bbox = boundingRectWithPadding(result, pad: 0)
-            guard bbox.area < 0.90 else {
-                continuation.resume(returning: nil)
-                return
+                allContours.append(result)
             }
 
-            continuation.resume(returning: result.isEmpty ? nil : result)
+            continuation.resume(returning: allContours)
         }
     }
 
@@ -923,7 +943,7 @@ struct FocusAnalyzer {
                                ratingBasis: FocusResult.RatingBasis = .subjectBody,
                                afPointRawScore: Double? = nil,
                                subjectBodyRawScore: Double? = nil,
-                               subjectContour: [CGPoint]? = nil) -> FocusResult {
+                               subjectContour: [[CGPoint]] = []) -> FocusResult {
         let w = cgImage.width, h = cgImage.height
         guard w > 2 && h > 2 else { return unanalyzed() }
 
@@ -1090,7 +1110,7 @@ struct FocusAnalyzer {
         FocusResult(status: .unanalyzed, score: 0, analysisRegion: .fullImage,
                     blurType: .unknown, subjectSizeConfidence: 0,
                     detectedAnimalLabel: nil, analysisRect: nil,
-                    subjectContour: nil,
+                    subjectContour: [],
                     detectionConfidence: nil, afOverlapsSubject: nil,
                     afOnEye: nil,
                     rawSharpnessScore: 0, subjectBodyArea: 0, scoringRectArea: 0,

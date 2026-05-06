@@ -318,8 +318,9 @@ private struct ThresholdGuideCard: View {
                                 y: 4)
                     }
 
-                    // Second needle — AF point raw score (Case 5 only)
-                    if let afRaw = file.afPointRawScore, afRaw > 0 {
+                    // Second needle — AF point raw score (degraded AF only)
+                    if file.ratingBasis == .afPointDegraded,
+                       let afRaw = file.afPointRawScore, afRaw > 0 {
                         ZStack {
                             Diamond()
                                 .fill(Color.cyan.opacity(0.85))
@@ -350,8 +351,8 @@ private struct ThresholdGuideCard: View {
                 Text("100%").font(.caption2).foregroundStyle(.secondary)
             }
 
-            // Dual-score legend (Case 5 only)
-            if file.afPointRawScore != nil {
+            // Dual-score legend — only shown when AF was degraded and subject score was used instead
+            if file.ratingBasis == .afPointDegraded, file.afPointRawScore != nil {
                 HStack(spacing: 12) {
                     HStack(spacing: 4) {
                         Circle().fill(Color(file.focusStatus.color)).frame(width: 10, height: 10)

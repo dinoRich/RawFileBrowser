@@ -24,7 +24,7 @@ struct RAWFile: Identifiable {
     var subjectSizeConfidence: Double = 0
     var detectedAnimalLabel: String? = nil
     var analysisRect: CGRect? = nil
-    var subjectContour: [[CGPoint]] = []
+    var subjectContour: [CGPoint]? = nil
     var detectionConfidence: Float? = nil
     /// Whether the camera AF point overlapped the detected subject.
     /// nil = no AF point or no subject (not applicable).

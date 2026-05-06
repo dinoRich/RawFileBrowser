@@ -132,6 +132,10 @@ struct RAWFileDetailView: View {
                                     offset: offset
                                 )
                             }
+
+                            // Exposure badge — top-left corner, always visible
+                            exposureBadge
+                                .padding(10)
                         }
                     }
 
@@ -349,6 +353,40 @@ struct RAWFileDetailView: View {
                 }
             }
 
+            // ISO noise indicator
+            if let iso = isoValue {
+                let level = classifyISO(iso)
+                HStack(spacing: 6) {
+                    Image(systemName: level.systemImage)
+                        .foregroundStyle(level.color)
+                    Text("ISO \(iso)")
+                        .fontWeight(.medium)
+                    Text("·")
+                    Text(level.label)
+                        .foregroundStyle(.secondary)
+                }
+                .font(.caption2)
+            }
+
+            // Shutter speed indicator
+            if let shutter = shutterSpeedSeconds {
+                let level = classifyShutter(shutter, focalLength: focalLengthMM)
+                HStack(spacing: 6) {
+                    Image(systemName: level.systemImage)
+                        .foregroundStyle(level.color)
+                    Text(formatShutter(shutter))
+                        .fontWeight(.medium)
+                    if let fl = focalLengthMM {
+                        Text("@ \(Int(fl))mm")
+                            .foregroundStyle(.secondary)
+                    }
+                    Text("·")
+                    Text(level.label)
+                        .foregroundStyle(.secondary)
+                }
+                .font(.caption2)
+            }
+
             if usedFallback {
                 HStack(spacing: 6) {
                     Image(systemName: "info.circle")
@@ -369,6 +407,197 @@ struct RAWFileDetailView: View {
         .background(.ultraThinMaterial)
         .clipShape(RoundedRectangle(cornerRadius: 10))
         .padding()
+    }
+
+    // MARK: - Exposure badge (top-left overlay)
+
+    @ViewBuilder
+    private var exposureBadge: some View {
+        let items = exposureBadgeItems
+        if !items.isEmpty {
+            HStack(spacing: 10) {
+                ForEach(items, id: \.label) { item in
+                    VStack(spacing: 1) {
+                        Text(item.value)
+                            .font(.system(size: 13, weight: .semibold, design: .monospaced))
+                            .foregroundStyle(.white)
+                        Text(item.label)
+                            .font(.system(size: 9, weight: .regular))
+                            .foregroundStyle(.white.opacity(0.6))
+                    }
+                }
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(.black.opacity(0.55))
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+            .allowsHitTesting(false)
+        }
+    }
+
+    private struct ExposureItem {
+        let label: String
+        let value: String
+    }
+
+    private var exposureBadgeItems: [ExposureItem] {
+        var items: [ExposureItem] = []
+        if let f = apertureValue {
+            items.append(ExposureItem(label: "APERTURE", value: "f/\(f)"))
+        }
+        if let s = shutterSpeedSeconds {
+            items.append(ExposureItem(label: "SHUTTER", value: formatShutter(s)))
+        }
+        if let iso = isoValue {
+            items.append(ExposureItem(label: "ISO", value: "\(iso)"))
+        }
+        return items
+    }
+
+    // MARK: - ISO noise assessment
+
+    /// Look up a metadata value by trying exact keys first, then suffix-matching
+    /// the nested "{Exif} > Key" format that RAWImageLoader produces on this device.
+    private func metadataValue(for keys: String...) -> String? {
+        for key in keys {
+            if let v = metadata[key] { return v }
+            for (k, v) in metadata where k.hasSuffix("> \(key)") { return v }
+        }
+        return nil
+    }
+
+    private var isoValue: Int? {
+        if let raw = metadataValue(for: "ISOSpeed", "ISOSpeedRatings", "PhotographicSensitivity"),
+           let val = Int(raw) {
+            return val
+        }
+        return nil
+    }
+
+    private enum ISOLevel {
+        case low, moderate, high, veryHigh
+
+        var label: String {
+            switch self {
+            case .low:      return "Low ISO — noise unlikely"
+            case .moderate: return "Moderate ISO — minor noise possible"
+            case .high:     return "High ISO — noise may reduce sharpness"
+            case .veryHigh: return "Very high ISO — noise likely affecting sharpness"
+            }
+        }
+
+        var color: Color {
+            switch self {
+            case .low:      return .green
+            case .moderate: return .yellow
+            case .high:     return .orange
+            case .veryHigh: return .red
+            }
+        }
+
+        var systemImage: String {
+            switch self {
+            case .low:      return "checkmark.circle"
+            case .moderate: return "exclamationmark.triangle"
+            case .high:     return "exclamationmark.triangle.fill"
+            case .veryHigh: return "xmark.octagon.fill"
+            }
+        }
+    }
+
+    /// Classify ISO for Canon APS-C cameras (7D MkII, R7).
+    private func classifyISO(_ iso: Int) -> ISOLevel {
+        switch iso {
+        case ..<800:       return .low
+        case 800..<3200:   return .moderate
+        case 3200..<12800: return .high
+        default:           return .veryHigh
+        }
+    }
+
+    // MARK: - Shutter speed assessment
+
+    /// Returns shutter speed as decimal seconds (e.g. 0.002 for 1/500s).
+    private var shutterSpeedSeconds: Double? {
+        guard let raw = metadataValue(for: "ExposureTime", "Exposure Time") else { return nil }
+        return Double(raw)
+    }
+
+    /// Returns focal length in mm.
+    private var focalLengthMM: Double? {
+        guard let raw = metadataValue(for: "FocalLength", "Focal Length") else { return nil }
+        return Double(raw)
+    }
+
+    /// Returns aperture as a formatted string (e.g. "6.3").
+    private var apertureValue: String? {
+        guard let raw = metadataValue(for: "FNumber", "F Number", "ApertureValue") else { return nil }
+        guard let f = Double(raw) else { return nil }
+        return f.truncatingRemainder(dividingBy: 1) == 0
+            ? String(Int(f))
+            : String(format: "%.1f", f)
+    }
+
+    private enum ShutterLevel {
+        case fast, adequate, marginal, slow
+
+        var label: String {
+            switch self {
+            case .fast:     return "Fast — motion blur unlikely"
+            case .adequate: return "Adequate — may show subject motion"
+            case .marginal: return "Marginal — likely cause of blur"
+            case .slow:     return "Slow — motion blur very likely"
+            }
+        }
+
+        var color: Color {
+            switch self {
+            case .fast:     return .green
+            case .adequate: return .yellow
+            case .marginal: return .orange
+            case .slow:     return .red
+            }
+        }
+
+        var systemImage: String {
+            switch self {
+            case .fast:     return "checkmark.circle"
+            case .adequate: return "exclamationmark.triangle"
+            case .marginal: return "exclamationmark.triangle.fill"
+            case .slow:     return "xmark.octagon.fill"
+            }
+        }
+    }
+
+    /// Classify shutter speed for wildlife photography.
+    /// Uses focal length to set the camera-shake floor (1/focal length rule).
+    private func classifyShutter(_ seconds: Double, focalLength: Double?) -> ShutterLevel {
+        let effectiveFocal = focalLength ?? 400.0
+        let shakeFloor     = 1.0 / effectiveFocal
+
+        let fastThreshold:     Double = 1.0 / 1000.0
+        let adequateThreshold: Double = 1.0 / 500.0
+
+        switch seconds {
+        case ...fastThreshold:
+            return .fast
+        case ...adequateThreshold:
+            return .adequate
+        case ...max(adequateThreshold, shakeFloor * 2):
+            return .marginal
+        default:
+            return .slow
+        }
+    }
+
+    /// Formats a shutter speed in seconds as a human-readable string.
+    private func formatShutter(_ seconds: Double) -> String {
+        if seconds < 1.0 {
+            let denom = Int((1.0 / seconds).rounded())
+            return "1/\(denom)s"
+        } else {
+            return String(format: "%.1fs", seconds)
+        }
     }
 
     // MARK: - Image loading

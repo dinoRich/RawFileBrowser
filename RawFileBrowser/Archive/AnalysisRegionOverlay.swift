@@ -14,8 +14,8 @@ struct AnalysisRegionOverlay: View {
     let scale: CGFloat
     var offset: CGSize = .zero
     /// Normalised subject silhouette contour points from the foreground mask.
-    /// When present, each array is drawn as a separate subject silhouette path.
-    var subjectContour: [[CGPoint]] = []
+    /// When present, drawn as a path instead of a bounding box.
+    var subjectContour: [CGPoint]? = nil
     /// Species label shown below the contour (e.g. "Robin").
     var detectedLabel: String? = nil
 
@@ -73,38 +73,33 @@ struct AnalysisRegionOverlay: View {
         let r = screenRect
         ZStack(alignment: .topLeading) {
 
-            // ── Subject silhouette contours ────────────────────────────────────
-            if !subjectContour.isEmpty {
-                // Draw each subject's contour individually
-                ForEach(Array(subjectContour.enumerated()), id: \.offset) { _, pts in
-                    if pts.count > 2 {
-                        let screenPts = pts.map { toScreen($0) }
-                        let contourPath = Path { path in
-                            path.move(to: screenPts[0])
-                            for pt in screenPts.dropFirst() {
-                                path.addLine(to: pt)
-                            }
-                            path.closeSubpath()
-                        }
-
-                        // Soft filled tint so the subject area is subtly highlighted
-                        contourPath
-                            .fill(overlayColor.opacity(0.08))
-
-                        // Dashed stroke outline
-                        contourPath
-                            .stroke(
-                                overlayColor.opacity(0.6),
-                                style: StrokeStyle(lineWidth: 1.5, dash: [5, 3])
-                            )
+            // ── Subject silhouette contour ─────────────────────────────────────
+            if let pts = subjectContour, pts.count > 2 {
+                // Build screen-space path from the normalised contour points
+                let screenPts = pts.map { toScreen($0) }
+                let contourPath = Path { path in
+                    path.move(to: screenPts[0])
+                    for pt in screenPts.dropFirst() {
+                        path.addLine(to: pt)
                     }
+                    path.closeSubpath()
                 }
 
-                // Species label — positioned below the lowest point across all contours
+                // Soft filled tint so the subject area is subtly highlighted
+                contourPath
+                    .fill(overlayColor.opacity(0.08))
+
+                // Dashed stroke outline
+                contourPath
+                    .stroke(
+                        overlayColor.opacity(0.6),
+                        style: StrokeStyle(lineWidth: 1.5, dash: [5, 3])
+                    )
+
+                // Species label — positioned below the contour's bounding box
                 if let label = detectedLabel {
-                    let allScreenPts = subjectContour.flatMap { $0.map { toScreen($0) } }
-                    let maxY = allScreenPts.map(\.y).max() ?? r.maxY
-                    let minX = allScreenPts.map(\.x).min() ?? r.minX
+                    let maxY = screenPts.map(\.y).max() ?? r.maxY
+                    let minX = screenPts.map(\.x).min() ?? r.minX
                     Text(label)
                         .font(.system(size: 10, weight: .semibold))
                         .foregroundStyle(overlayColor.opacity(0.9))
