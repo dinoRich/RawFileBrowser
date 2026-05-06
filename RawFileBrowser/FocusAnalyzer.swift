@@ -403,6 +403,23 @@ struct FocusAnalyzer {
                            ratingBasis: basis)
     }
 
+    /// Applies a mild unsharp mask to a crop before Laplacian scoring.
+    /// This compensates for JPEG compression softening in the embedded preview,
+    /// which would otherwise cause the Laplacian to underestimate true sharpness.
+    /// Strength is deliberately conservative: enough to recover edge detail lost
+    /// to JPEG compression, but not enough to inflate scores on genuinely blurry images.
+    /// If the filter fails for any reason, the original image is returned unchanged.
+    private static func sharpenCrop(_ image: CGImage) -> CGImage {
+        let ciImage = CIImage(cgImage: image)
+        let filter  = CIFilter(name: "CIUnsharpMask")!
+        filter.setValue(ciImage, forKey: kCIInputImageKey)
+        filter.setValue(1.0,     forKey: kCIInputRadiusKey)    // edge detection radius in pixels
+        filter.setValue(0.4,     forKey: kCIInputIntensityKey) // sharpening strength (0=none, 1=strong)
+        guard let output = filter.outputImage else { return image }
+        let ctx = CIContext()
+        return ctx.createCGImage(output, from: output.extent) ?? image
+    }
+
     /// Computes raw Laplacian variance for a CGImage crop without building a full FocusResult.
     /// Returns the combined sqrt(varH * varV) value — the same metric used in score().
     private static func rawLaplacian(cgImage: CGImage) -> Double? {
@@ -415,7 +432,11 @@ struct FocusAnalyzer {
                                   space: CGColorSpaceCreateDeviceRGB(),
                                   bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
         else { return nil }
-        ctx.draw(cgImage, in: CGRect(x: 0, y: 0, width: w, height: h))
+        // Apply mild sharpening before scoring to compensate for JPEG compression
+        // softening in the embedded preview. This makes the Laplacian a more accurate
+        // proxy for the true sharpness of the underlying RAW sensor data.
+        let sharpened = sharpenCrop(cgImage)
+        ctx.draw(sharpened, in: CGRect(x: 0, y: 0, width: w, height: h))
 
         var sumH = 0.0, ssH = 0.0, sumV = 0.0, ssV = 0.0, n = 0.0
         for y in 1..<(h - 1) {
