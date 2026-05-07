@@ -7,37 +7,31 @@ import Vision
 // MARK: - Public types
 
 enum FocusStatus: String, Codable, Hashable, Equatable {
-    case sharp                = "Sharp"
-    case slightlyBlur         = "Slightly Blurry"
-    case blurry               = "Blurry"
-    case missedFocus          = "Missed Focus"          // AF point found, NOT on subject, subject below acceptable
-    case possibleMissedFocus  = "Possible Missed Focus" // AF point found, NOT on subject, subject meets acceptable
-    case unanalyzed           = "Not Analyzed"
+    case sharp        = "Sharp"
+    case slightlyBlur = "Slightly Blurry"
+    case blurry       = "Blurry"
+    case unanalyzed   = "Not Analyzed"
 
     /// True for outcomes where the photo should be considered a reject
     var isRejected: Bool {
-        self == .blurry || self == .slightlyBlur || self == .missedFocus || self == .possibleMissedFocus
+        self == .blurry
     }
 
     var systemImage: String {
         switch self {
-        case .sharp:               return "checkmark.circle.fill"
-        case .slightlyBlur:        return "exclamationmark.circle.fill"
-        case .blurry:              return "xmark.circle.fill"
-        case .missedFocus:         return "scope"
-        case .possibleMissedFocus: return "questionmark.diamond.fill"
-        case .unanalyzed:          return "questionmark.circle"
+        case .sharp:        return "checkmark.circle.fill"
+        case .slightlyBlur: return "exclamationmark.circle.fill"
+        case .blurry:       return "xmark.circle.fill"
+        case .unanalyzed:   return "questionmark.circle"
         }
     }
 
     var color: UIColor {
         switch self {
-        case .sharp:               return .systemGreen
-        case .slightlyBlur:        return .systemOrange
-        case .blurry:              return .systemRed
-        case .missedFocus:         return .systemPurple
-        case .possibleMissedFocus: return .systemIndigo
-        case .unanalyzed:          return .systemGray
+        case .sharp:        return .systemGreen
+        case .slightlyBlur: return .systemOrange
+        case .blurry:       return .systemRed
+        case .unanalyzed:   return .systemGray
         }
     }
 }
@@ -72,6 +66,9 @@ struct FocusResult {
     /// nil = no AF point, or no eye was detected (can't say either way).
     /// true = AF covered the eye. false = eye found but AF missed it.
     let afOnEye: Bool?
+    /// True when an AF point was found but did NOT overlap the detected subject.
+    /// The sharpness status reflects the subject body independently of this flag.
+    let afNotOnSubject: Bool
 
     // MARK: Diagnostic fields
     /// Laplacian score BEFORE the size-confidence multiplier (0–1 normalised).
@@ -100,12 +97,10 @@ struct FocusResult {
 
     /// Describes which region drove the final sharpness rating and why.
     enum RatingBasis: String {
-        case afPoint         = "AF Point"                     // Case 5: AF score met sharp threshold
-        case subjectBody     = "Subject Body"                 // Cases 2, 3, 4, or Case 5 fallback
-        case afPointDegraded = "Subject (AF Point Degraded)"  // Case 5: AF below sharp, subject used instead
-        case fullImage       = "Full Image"                   // Case 1
-        case missedFocus     = "Missed Focus"                 // Case 3
-        case possibleMissed  = "Possible Missed Focus"        // Case 4
+        case afPoint         = "AF Point"                    // Case 5: AF score met sharp threshold
+        case subjectBody     = "Subject Body"                // Cases 2, 3, 4, or Case 5 fallback
+        case afPointDegraded = "Subject (AF Point Degraded)" // Case 5: AF below sharp, subject used instead
+        case fullImage       = "Full Image"                  // Case 1
     }
 
     enum AnalysisRegion: String {
@@ -392,6 +387,7 @@ struct FocusAnalyzer {
                            detectionConfidence: subject.confidence,
                            afOverlapsSubject: true,
                            afOnEye: afOnEye,
+                           afNotOnSubject: false,
                            rawSharpnessScore: useRaw,
                            subjectBodyArea: bodyArea,
                            scoringRectArea: scoringArea,
@@ -506,7 +502,7 @@ struct FocusAnalyzer {
         let thresholds = RegionThresholds.body
         let bodyArea   = Double(subjectRect.width * subjectRect.height)
 
-        // Score subject body sharpness
+        // Score subject body sharpness — same classification as normal cases
         let rawScore: Double
         let finalScore: Double
         if let cropped = crop(cgImage, to: subjectRect), cropped.width > 4, cropped.height > 4,
@@ -518,24 +514,30 @@ struct FocusAnalyzer {
             finalScore = 0
         }
 
-        // Case 3 vs Case 4
+        // Classify sharpness normally — AF position does not affect the status
         let focusStatus: FocusStatus
-        let basis: FocusResult.RatingBasis
-        if finalScore >= thresholds.acceptable {
-            focusStatus = .possibleMissedFocus
-            basis       = .possibleMissed
-            print("FocusAnalyzer: Case 4 → Possible Missed Focus (subject score \(String(format:"%.2f", finalScore)) meets acceptable)")
-        } else {
-            focusStatus = .missedFocus
-            basis       = .missedFocus
-            print("FocusAnalyzer: Case 3 → Missed Focus (subject score \(String(format:"%.2f", finalScore)) below acceptable)")
+        switch finalScore {
+        case thresholds.sharp...:      focusStatus = .sharp
+        case thresholds.acceptable...: focusStatus = .slightlyBlur
+        default:                       focusStatus = .blurry
         }
+
+        let blurType: BlurType
+        if finalScore >= thresholds.sharp {
+            blurType = .none
+        } else if finalScore < thresholds.acceptable {
+            blurType = .defocus
+        } else {
+            blurType = .mixed
+        }
+
+        print("FocusAnalyzer: AF not on subject → subject sharpness \(focusStatus.rawValue) (score \(String(format:"%.2f", finalScore)))")
 
         return FocusResult(
             status:                focusStatus,
             score:                 finalScore,
             analysisRegion:        .missedFocus,
-            blurType:              finalScore < thresholds.acceptable ? .defocus : .mixed,
+            blurType:              blurType,
             subjectSizeConfidence: sizeConf,
             detectedAnimalLabel:   label,
             analysisRect:          afRect,
@@ -543,6 +545,7 @@ struct FocusAnalyzer {
             detectionConfidence:   confidence,
             afOverlapsSubject:     false,
             afOnEye:               afOnEye,
+            afNotOnSubject:        true,
             rawSharpnessScore:     rawScore,
             subjectBodyArea:       bodyArea,
             scoringRectArea:       Double(afRect.width * afRect.height),
@@ -551,7 +554,7 @@ struct FocusAnalyzer {
             acceptableThreshold:   thresholds.acceptable,
             afPointRawScore:       nil,
             subjectBodyRawScore:   rawScore,
-            ratingBasis:           basis
+            ratingBasis:           .subjectBody
         )
     }
 
@@ -1033,6 +1036,7 @@ struct FocusAnalyzer {
                            detectionConfidence: detectionConfidence,
                            afOverlapsSubject: afOverlapsSubject,
                            afOnEye: afOnEye,
+                           afNotOnSubject: false,
                            rawSharpnessScore: rawScore,
                            subjectBodyArea: bodyArea,
                            scoringRectArea: scoringArea,
@@ -1134,6 +1138,7 @@ struct FocusAnalyzer {
                     subjectContour: [],
                     detectionConfidence: nil, afOverlapsSubject: nil,
                     afOnEye: nil,
+                    afNotOnSubject: false,
                     rawSharpnessScore: 0, subjectBodyArea: 0, scoringRectArea: 0,
                     hadAFPoint: false, sharpThreshold: 0, acceptableThreshold: 0,
                     afPointRawScore: nil, subjectBodyRawScore: nil,

@@ -15,12 +15,11 @@ struct RAWFileGridView: View {
     }
 
     enum FilterMode: String, CaseIterable {
-        case all                = "All"
-        case sharp              = "Sharp"
-        case rejected           = "Rejected"
-        case missedFocus        = "Missed Focus"
-        case possibleMissedFocus = "Possible Missed"
-        case unanalyzed         = "Unanalyzed"
+        case all        = "All"
+        case accepted   = "Accepted"
+        case rejected   = "Rejected"
+        case sharp      = "Sharp"
+        case unanalyzed = "Unanalyzed"
     }
 
     private var filteredFiles: [RAWFile] {
@@ -33,12 +32,11 @@ struct RAWFileGridView: View {
 
         // Filter
         switch filterMode {
-        case .all: break
-        case .sharp:               files = files.filter { $0.focusStatus == .sharp }
-        case .rejected:            files = files.filter { $0.isRejected }
-        case .missedFocus:         files = files.filter { $0.focusStatus == .missedFocus }
-        case .possibleMissedFocus: files = files.filter { $0.focusStatus == .possibleMissedFocus }
-        case .unanalyzed:          files = files.filter { $0.focusStatus == .unanalyzed }
+        case .all:        break
+        case .accepted:   files = files.filter { $0.pickStatus == .accepted }
+        case .rejected:   files = files.filter { $0.pickStatus == .rejected }
+        case .sharp:      files = files.filter { $0.focusStatus == .sharp }
+        case .unanalyzed: files = files.filter { $0.focusStatus == .unanalyzed }
         }
 
         // Sort
@@ -93,13 +91,14 @@ struct RAWFileGridView: View {
                 ScrollView {
                     LazyVGrid(columns: columns, spacing: 12) {
                         ForEach(filteredFiles) { file in
-                            RAWFileThumbnailCard(file: file)
+                            RAWFileThumbnailCard(file: file, manager: manager)
                                 .onTapGesture { selectedFile = file }
-                                .id("\(file.id)-\(file.focusStatus.rawValue)")
+                                .id("\(file.id)-\(file.focusStatus.rawValue)-\(file.pickStatus.rawValue)")
                         }
                     }
                     .padding()
                 }
+                .background(Color(.systemGray6))
             }
         }
         .searchable(text: $searchText, prompt: "Search files")
@@ -188,19 +187,13 @@ struct RAWFileGridView: View {
 
     private var analysisSummaryBar: some View {
         HStack(spacing: 16) {
-            Label("\(manager.rawFiles.filter { $0.focusStatus == .sharp }.count) sharp",
-                  systemImage: "checkmark.circle.fill")
-                .foregroundStyle(.green)
+            Label("\(manager.rawFiles.filter { $0.pickStatus == .accepted }.count) accepted",
+                  systemImage: "flag")
+                .foregroundStyle(.primary)
 
             Label("\(manager.rejectedCount) rejected",
-                  systemImage: "xmark.circle.fill")
-                .foregroundStyle(.red)
-
-            if manager.rawFiles.filter({ $0.focusStatus == .missedFocus }).count > 0 {
-                Label("\(manager.rawFiles.filter { $0.focusStatus == .missedFocus }.count) missed",
-                      systemImage: "scope")
-                    .foregroundStyle(.purple)
-            }
+                  systemImage: "flag.fill")
+                .foregroundStyle(.secondary)
 
             Spacer()
 
@@ -217,13 +210,17 @@ struct RAWFileGridView: View {
 
     private var emptyState: some View {
         VStack(spacing: 16) {
-            Image(systemName: filterMode == .rejected ? "xmark.circle" : "photo.on.rectangle.angled")
+            Image(systemName: filterMode == .rejected ? "flag.fill" : "photo.on.rectangle.angled")
                 .font(.system(size: 60))
                 .foregroundStyle(.secondary)
-            Text(filterMode == .rejected ? "No rejected files" : "No files match")
+            Text(filterMode == .rejected ? "No rejected files"
+                 : filterMode == .accepted ? "No accepted files"
+                 : "No files match")
                 .font(.title2.weight(.semibold))
             Text(filterMode == .rejected
-                 ? "All analyzed photos appear to be in focus."
+                 ? "No photos have been rejected yet."
+                 : filterMode == .accepted
+                 ? "No photos have been accepted yet."
                  : "Try adjusting your search or filter.")
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
