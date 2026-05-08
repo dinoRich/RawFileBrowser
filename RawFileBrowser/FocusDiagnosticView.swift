@@ -187,10 +187,10 @@ struct FocusDiagnosticView: View {
     private func branchDescription(_ file: RAWFile) -> String {
         switch (file.hadAFPoint, file.detectedAnimalLabel != nil || isHuman(file)) {
         case (true, true):
-            switch file.focusStatus {
-            case .missedFocus:        return "AF + Subject → Missed Focus (Case 3)"
-            case .possibleMissedFocus: return "AF + Subject → Possible Missed Focus (Case 4)"
-            default:                  return "AF + Subject → AF on Subject (Case 5)"
+            if file.afNotOnSubject {
+                return "AF + Subject → AF not on subject (Cases 3/4)"
+            } else {
+                return "AF + Subject → AF on Subject (Case 5)"
             }
         case (true, false):  return "AF only → Score at AF point"
         case (false, true):  return "Subject only → Score at subject body (Case 2)"
@@ -204,8 +204,6 @@ struct FocusDiagnosticView: View {
         case .subjectBody:     return .primary
         case .afPointDegraded: return .orange
         case .fullImage:       return .secondary
-        case .missedFocus:     return .purple
-        case .possibleMissed:  return .indigo
         }
     }
 

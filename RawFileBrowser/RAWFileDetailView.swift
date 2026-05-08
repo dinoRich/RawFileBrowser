@@ -314,24 +314,28 @@ struct RAWFileDetailView: View {
                     }
                     .font(.caption)
 
+                    // "AF not on subject" warning — shown regardless of sharpness
+                    if file.afNotOnSubject {
+                        HStack(spacing: 6) {
+                            Label("AF not on subject",
+                                  systemImage: "scope")
+                                .foregroundStyle(.purple)
+                        }
+                        .font(.caption2)
+                    }
+
                     if file.focusStatus != .sharp {
                         HStack(spacing: 6) {
-                            if file.focusStatus == .missedFocus {
-                                Label("AF point missed subject",
-                                      systemImage: "scope")
-                                    .foregroundStyle(.purple)
-                            } else {
-                                if file.blurType != .none && file.blurType != .unknown {
-                                    Label(file.blurType.rawValue,
-                                          systemImage: file.blurType == .motionBlur
-                                              ? "arrow.left.and.right" : "scope")
-                                        .foregroundStyle(.orange)
-                                }
-                                if file.subjectSizeConfidence < 0.4 {
-                                    Label("Small subject",
-                                          systemImage: "minus.magnifyingglass")
-                                        .foregroundStyle(.yellow)
-                                }
+                            if file.blurType != .none && file.blurType != .unknown {
+                                Label(file.blurType.rawValue,
+                                      systemImage: file.blurType == .motionBlur
+                                          ? "arrow.left.and.right" : "scope")
+                                    .foregroundStyle(.orange)
+                            }
+                            if file.subjectSizeConfidence < 0.4 {
+                                Label("Small subject",
+                                      systemImage: "minus.magnifyingglass")
+                                    .foregroundStyle(.yellow)
                             }
                         }
                         .font(.caption2)

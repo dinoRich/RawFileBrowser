@@ -2,6 +2,29 @@ import Foundation
 import UIKit
 import Combine
 
+// MARK: - Pick status
+
+/// Whether the user (or the auto-analysis pass) has accepted or rejected a photo.
+/// Separate from focus quality — the user can override the auto-set value.
+enum PickStatus: String, Codable {
+    case accepted   // white flag (black outline)
+    case rejected   // black flag (white outline) + greyed thumbnail
+    case unpicked   // no flag shown — not yet decided
+}
+
+// MARK: - Label colour
+
+/// A colour label the user can attach to a photo. `.none` means no label.
+enum LabelColour: String, Codable, CaseIterable {
+    case none
+    case red
+    case yellow
+    case green
+    case blue
+    case purple
+
+}
+
 // MARK: - RAWFile model
 
 struct RAWFile: Identifiable {
@@ -24,7 +47,7 @@ struct RAWFile: Identifiable {
     var subjectSizeConfidence: Double = 0
     var detectedAnimalLabel: String? = nil
     var analysisRect: CGRect? = nil
-    var subjectContour: [CGPoint]? = nil
+    var subjectContour: [[CGPoint]] = []
     var detectionConfidence: Float? = nil
     /// Whether the camera AF point overlapped the detected subject.
     /// nil = no AF point or no subject (not applicable).
@@ -34,6 +57,9 @@ struct RAWFile: Identifiable {
     /// nil = no AF point, or no eye detected.
     /// true = AF was on the eye. false = eye found but AF missed it.
     var afOnEye: Bool? = nil
+    /// True when analysis found the AF point was NOT on the detected subject.
+    /// The sharpness status is determined from the subject body regardless.
+    var afNotOnSubject: Bool = false
     // Diagnostic fields — raw values before thresholds are applied
     /// Laplacian variance score BEFORE the size-confidence penalty is applied (0-1 normalised)
     var rawSharpnessScore: Double = 0
@@ -52,7 +78,21 @@ struct RAWFile: Identifiable {
     /// Which region drove the final rating
     var ratingBasis: FocusResult.RatingBasis = .fullImage
     var xmpWritten: Bool = false
-    var isRejected: Bool { focusStatus.isRejected }
+
+    // MARK: Pick status
+    /// The current accept/reject decision for this photo.
+    var pickStatus: PickStatus = .unpicked
+    /// True once the user has manually overridden the auto-set pick status.
+    var pickIsOverridden: Bool = false
+
+    // MARK: Star rating & colour label
+    /// Star rating set by the user. 0 = unrated (not shown on thumbnail).
+    var starRating: Int = 0
+    /// Colour label shown as the thumbnail outline. .none = no colour.
+    var labelColour: LabelColour = .none
+
+    /// Convenience: true when the photo should be visually treated as rejected.
+    var isRejected: Bool { pickStatus == .rejected }
 }
 
 extension RAWFile: Hashable, Equatable {
@@ -185,6 +225,10 @@ final class SDCardManager: ObservableObject {
                     rawFiles[i].afPointRawScore       = result.afPointRawScore
                     rawFiles[i].subjectBodyRawScore   = result.subjectBodyRawScore
                     rawFiles[i].ratingBasis           = result.ratingBasis
+                    // Auto-set pick status from quality, unless the user has already overridden it
+                    if !rawFiles[i].pickIsOverridden {
+                        rawFiles[i].pickStatus = result.status.isRejected ? .rejected : .accepted
+                    }
                 }
             }
 
@@ -208,6 +252,7 @@ final class SDCardManager: ObservableObject {
         rawFiles[idx].detectionConfidence   = result.detectionConfidence
         rawFiles[idx].afOverlapsSubject     = result.afOverlapsSubject
         rawFiles[idx].afOnEye               = result.afOnEye
+        rawFiles[idx].afNotOnSubject        = result.afNotOnSubject
         rawFiles[idx].rawSharpnessScore     = result.rawSharpnessScore
         rawFiles[idx].subjectBodyArea       = result.subjectBodyArea
         rawFiles[idx].scoringRectArea       = result.scoringRectArea
@@ -217,9 +262,31 @@ final class SDCardManager: ObservableObject {
         rawFiles[idx].afPointRawScore       = result.afPointRawScore
         rawFiles[idx].subjectBodyRawScore   = result.subjectBodyRawScore
         rawFiles[idx].ratingBasis           = result.ratingBasis
+        if !rawFiles[idx].pickIsOverridden {
+            rawFiles[idx].pickStatus = result.status.isRejected ? .rejected : .accepted
+        }
     }
 
-    var rejectedCount: Int { rawFiles.filter(\.isRejected).count }
+    var rejectedCount: Int { rawFiles.filter { $0.pickStatus == .rejected }.count }
+
+    /// Set the pick status for a file. Marks the override flag so re-analysis won't reset it.
+    func setPickStatus(_ status: PickStatus, for file: RAWFile) {
+        guard let idx = rawFiles.firstIndex(where: { $0.id == file.id }) else { return }
+        rawFiles[idx].pickStatus = status
+        rawFiles[idx].pickIsOverridden = (status != .unpicked)
+    }
+
+    /// Set the star rating (0–5) for a file.
+    func setStarRating(_ rating: Int, for file: RAWFile) {
+        guard let idx = rawFiles.firstIndex(where: { $0.id == file.id }) else { return }
+        rawFiles[idx].starRating = min(max(rating, 0), 5)
+    }
+
+    /// Set the colour label for a file.
+    func setLabelColour(_ colour: LabelColour, for file: RAWFile) {
+        guard let idx = rawFiles.firstIndex(where: { $0.id == file.id }) else { return }
+        rawFiles[idx].labelColour = colour
+    }
 
     func markXMPWritten(for file: RAWFile) {
         guard let idx = rawFiles.firstIndex(where: { $0.id == file.id }) else { return }

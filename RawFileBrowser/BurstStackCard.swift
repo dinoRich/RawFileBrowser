@@ -1,28 +1,47 @@
 import SwiftUI
-import ImageIO
 
-struct RAWFileThumbnailCard: View {
-    let file: RAWFile
+/// Thumbnail card shown in the grid when a grid item is a burst stack.
+/// Displays the cover photo with a stacked-cards visual effect and a count
+/// badge. Long-pressing opens BurstLabelPickerSheet, which is visually
+/// identical to LabelPickerSheet but applies every action to all photos
+/// in the stack.
+struct BurstStackCard: View {
+    let stack: BurstStack
     @ObservedObject var manager: SDCardManager
+    let visibleCount: Int
+
     @State private var thumbnail: UIImage?
     @State private var isLoading = true
-    @State private var showLabelSheet = false
+    @State private var showActionSheet = false
 
-    /// Always read live state from the manager so the UI stays in sync.
-    private var liveFile: RAWFile? {
-        manager.rawFiles.first { $0.id == file.id }
+    /// Always read the cover file live so badges stay in sync.
+    private var liveCover: RAWFile? {
+        manager.rawFiles.first { $0.id == stack.coverFile.id }
     }
 
     var body: some View {
-        let live = liveFile ?? file   // fallback to snapshot if not found
+        let cover = liveCover ?? stack.coverFile
 
         VStack(alignment: .leading, spacing: 6) {
+
             // ── Image area ──────────────────────────────────────────────
             GeometryReader { geo in
-                let imgHeight = geo.size.width * 3 / 4   // 4:3 ratio
+                let imgHeight = geo.size.width * 3 / 4  // 4:3 ratio
+
                 ZStack(alignment: .bottomLeading) {
 
-                    // Base thumbnail
+                    // Stacked-cards shadow layers drawn behind the main card
+                    RoundedRectangle(cornerRadius: 10)
+                        .fill(Color(.systemGray4))
+                        .frame(width: geo.size.width - 8, height: imgHeight)
+                        .offset(x: 6, y: -6)
+
+                    RoundedRectangle(cornerRadius: 10)
+                        .fill(Color(.systemGray5))
+                        .frame(width: geo.size.width - 4, height: imgHeight)
+                        .offset(x: 3, y: -3)
+
+                    // Main (front) card
                     ZStack {
                         RoundedRectangle(cornerRadius: 10)
                             .fill(Color(.secondarySystemBackground))
@@ -44,64 +63,59 @@ struct RAWFileThumbnailCard: View {
                     .frame(width: geo.size.width, height: imgHeight)
                     .clipShape(RoundedRectangle(cornerRadius: 10))
                     .overlay {
-                        // Colour label outline takes precedence over pick-status outline
-                        if let outlineColor = live.labelColour.swiftUIColor {
+                        if let outlineColor = cover.labelColour.swiftUIColor {
                             RoundedRectangle(cornerRadius: 10)
                                 .strokeBorder(outlineColor, lineWidth: 3)
-                        } else if live.pickStatus == .accepted {
+                        } else if cover.pickStatus == .accepted {
                             RoundedRectangle(cornerRadius: 10)
                                 .strokeBorder(Color.white, lineWidth: 3)
-                        } else if live.pickStatus == .rejected {
+                        } else if cover.pickStatus == .rejected {
                             RoundedRectangle(cornerRadius: 10)
                                 .strokeBorder(Color.black, lineWidth: 3)
                         }
                     }
 
-                    // ── Top-right: star rating badge ─────────────────────
-                    if live.starRating > 0 {
-                        StarRatingBadge(rating: live.starRating)
-                            .frame(maxWidth: .infinity, maxHeight: .infinity,
-                                   alignment: .topTrailing)
-                            .padding(6)
-                    }
+                    // Top-right: burst count badge
+                    BurstCountBadge(count: visibleCount)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity,
+                               alignment: .topTrailing)
+                        .padding(6)
 
-                    // ── Bottom-left: quality badge ───────────────────────
-                    if live.focusStatus != .unanalyzed,
-                       let badge = QualityBadgeInfo(status: live.focusStatus) {
+                    // Bottom-left: quality badge (cover photo)
+                    if cover.focusStatus != .unanalyzed,
+                       let badge = QualityBadgeInfo(status: cover.focusStatus) {
                         QualityBadge(info: badge)
                             .padding(6)
                     }
 
-                    // ── Bottom-right: pick/flag badge ────────────────────
-                    if live.pickStatus != .unpicked {
-                        PickFlagBadge(status: live.pickStatus)
+                    // Bottom-right: pick/flag badge (cover photo)
+                    if cover.pickStatus != .unpicked {
+                        PickFlagBadge(status: cover.pickStatus)
                             .frame(maxWidth: .infinity, alignment: .trailing)
                             .padding(6)
                     }
                 }
             }
             .aspectRatio(4/3, contentMode: .fit)
-            // Long-press opens edit sheet directly
             .onLongPressGesture {
-                showLabelSheet = true
+                showActionSheet = true
             }
-            // Edit sheet
-            .sheet(isPresented: $showLabelSheet) {
-                LabelPickerSheet(file: file, manager: manager)
+            .sheet(isPresented: $showActionSheet) {
+                BurstLabelPickerSheet(stack: stack, manager: manager)
                     .presentationDetents([.height(220)])
                     .presentationDragIndicator(.visible)
             }
 
-            // ── Filename / metadata row ──────────────────────────────────
+            // ── Filename / metadata row ─────────────────────────────────
             VStack(alignment: .leading, spacing: 2) {
-                Text(live.name)
+                Text("Burst — \(stack.count) photos")
                     .font(.caption.weight(.medium))
                     .lineLimit(2)
                     .truncationMode(.middle)
-                    .foregroundStyle(live.pickStatus == .rejected ? .secondary : .primary)
+                    .foregroundStyle(.primary)
 
                 HStack {
-                    Text(live.fileExtension)
+                    Text(cover.fileExtension)
                         .font(.caption2)
                         .padding(.horizontal, 5)
                         .padding(.vertical, 2)
@@ -109,7 +123,7 @@ struct RAWFileThumbnailCard: View {
                         .foregroundStyle(Color.accentColor)
                         .clipShape(Capsule())
                     Spacer()
-                    Text(live.formattedSize)
+                    Text(cover.formattedSize)
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                 }
@@ -121,7 +135,7 @@ struct RAWFileThumbnailCard: View {
 
     private func loadThumbnail() {
         isLoading = true
-        let url = file.url
+        let url = stack.coverFile.url
         DispatchQueue.global(qos: .background).async {
             let thumb = RAWImageLoader.thumbnail(from: url)
             DispatchQueue.main.async {
@@ -134,42 +148,46 @@ struct RAWFileThumbnailCard: View {
     }
 }
 
-// MARK: - Label picker sheet
-// Opens directly on long-press. Reads live state from the manager.
-// Pick status uses a local @State so flag taps never dismiss the sheet.
+// MARK: - BurstLabelPickerSheet
+//
+// Visually identical to LabelPickerSheet. Every action applies to all files
+// in the stack. The cover photo's current values are used as the "active"
+// indicator for pick status, stars, and colour — giving a clear, consistent
+// reference state without trying to reconcile mixed states across the burst.
 
-struct LabelPickerSheet: View {
-    let file: RAWFile
+struct BurstLabelPickerSheet: View {
+    let stack: BurstStack
     @ObservedObject var manager: SDCardManager
 
-    // Local pick state so flag taps never cause the sheet to dismiss/re-present.
-    // Initialised from the file snapshot; kept in sync with manager on each tap.
+    // Local pick state mirrors LabelPickerSheet — prevents sheet dismissal
+    // on each tap, and is initialised from the cover photo.
     @State private var pickStatus: PickStatus
 
-    init(file: RAWFile, manager: SDCardManager) {
-        self.file = file
+    init(stack: BurstStack, manager: SDCardManager) {
+        self.stack = stack
         self.manager = manager
-        _pickStatus = State(initialValue: file.pickStatus)
+        _pickStatus = State(initialValue: stack.coverFile.pickStatus)
     }
 
-    private var liveFile: RAWFile? {
-        manager.rawFiles.first { $0.id == file.id }
+    /// Live cover file — drives the star and colour indicator.
+    private var liveCover: RAWFile? {
+        manager.rawFiles.first { $0.id == stack.coverFile.id }
     }
 
     var body: some View {
-        let live = liveFile ?? file
+        let cover = liveCover ?? stack.coverFile
 
         VStack(spacing: 24) {
 
-            // ── Pick row: thumbnail-style flags, no X ─────────────────────
+            // ── Pick row ─────────────────────────────────────────────────
             HStack(spacing: 32) {
                 Spacer()
 
-                // Accept flag: white fill, black outline
+                // Accept all: white fill, black outline
                 Button {
                     let next: PickStatus = pickStatus == .accepted ? .unpicked : .accepted
                     pickStatus = next
-                    manager.setPickStatus(next, for: file)
+                    manager.setPickStatus(next, forAllIn: stack)
                 } label: {
                     ZStack {
                         Image(systemName: "flag.fill")
@@ -183,11 +201,11 @@ struct LabelPickerSheet: View {
                 }
                 .buttonStyle(.plain)
 
-                // Reject flag: black fill, white outline
+                // Reject all: black fill, white outline
                 Button {
                     let next: PickStatus = pickStatus == .rejected ? .unpicked : .rejected
                     pickStatus = next
-                    manager.setPickStatus(next, for: file)
+                    manager.setPickStatus(next, forAllIn: stack)
                 } label: {
                     ZStack {
                         Image(systemName: "flag.fill")
@@ -204,29 +222,29 @@ struct LabelPickerSheet: View {
                 Spacer()
             }
 
-            // ── Stars only ───────────────────────────────────────────────
+            // ── Stars ────────────────────────────────────────────────────
             HStack(spacing: 12) {
                 Spacer()
                 ForEach(1...5, id: \.self) { n in
                     Button {
-                        manager.setStarRating(live.starRating == n ? 0 : n, for: file)
+                        manager.setStarRating(cover.starRating == n ? 0 : n, forAllIn: stack)
                     } label: {
-                        Image(systemName: n <= live.starRating ? "star.fill" : "star")
+                        Image(systemName: n <= cover.starRating ? "star.fill" : "star")
                             .font(.system(size: 32))
-                            .foregroundStyle(n <= live.starRating ? Color.yellow : Color(.tertiaryLabel))
+                            .foregroundStyle(n <= cover.starRating ? Color.yellow : Color(.tertiaryLabel))
                     }
                     .buttonStyle(.plain)
                 }
                 Spacer()
             }
 
-            // ── Colour swatches only ──────────────────────────────────────
+            // ── Colour swatches ──────────────────────────────────────────
             HStack(spacing: 14) {
                 Spacer()
 
                 // None swatch
                 Button {
-                    manager.setLabelColour(.none, for: file)
+                    manager.setLabelColour(.none, forAllIn: stack)
                 } label: {
                     ZStack {
                         Circle()
@@ -238,7 +256,7 @@ struct LabelPickerSheet: View {
                             .rotationEffect(.degrees(90))
                     }
                     .overlay {
-                        if live.labelColour == .none {
+                        if cover.labelColour == .none {
                             Circle().strokeBorder(Color.primary, lineWidth: 2.5)
                         }
                     }
@@ -247,13 +265,13 @@ struct LabelPickerSheet: View {
 
                 ForEach(LabelColour.allCases.filter { $0 != .none }, id: \.self) { colour in
                     Button {
-                        manager.setLabelColour(colour, for: file)
+                        manager.setLabelColour(colour, forAllIn: stack)
                     } label: {
                         Circle()
                             .fill(colour.swiftUIColor ?? .clear)
                             .frame(width: 36, height: 36)
                             .overlay {
-                                if live.labelColour == colour {
+                                if cover.labelColour == colour {
                                     Circle().strokeBorder(Color.primary, lineWidth: 2.5)
                                 }
                             }
@@ -270,107 +288,22 @@ struct LabelPickerSheet: View {
     }
 }
 
-// MARK: - LabelColour → SwiftUI Color
-// Kept in the view layer so SDCardManager stays free of SwiftUI imports.
+// MARK: - Burst count badge
 
-extension LabelColour {
-    var swiftUIColor: Color? {
-        switch self {
-        case .none:   return nil
-        case .red:    return .red
-        case .yellow: return .yellow
-        case .green:  return .green
-        case .blue:   return .blue
-        case .purple: return .purple
-        }
-    }
-}
-
-// MARK: - Quality badge
-
-struct QualityBadgeInfo {
-    let systemImage: String
-    let color: Color
-    let label: String
-
-    init?(status: FocusStatus) {
-        switch status {
-        case .sharp:
-            systemImage = "circle.dashed"; color = .green;  label = "Sharp"
-        case .slightlyBlur:
-            systemImage = "circle.dashed"; color = .orange; label = "Slightly Blurry"
-        case .blurry:
-            systemImage = "circle.dashed"; color = .red;    label = "Blurry"
-        default:
-            return nil
-        }
-    }
-}
-
-struct QualityBadge: View {
-    let info: QualityBadgeInfo
+struct BurstCountBadge: View {
+    let count: Int
 
     var body: some View {
-        Image(systemName: info.systemImage)
-            .font(.system(size: 16, weight: .bold))
-            .foregroundStyle(info.color)
-            .background(Circle().fill(.regularMaterial).padding(-3))
-            .shadow(radius: 1)
-            .help(info.label)
-    }
-}
-
-// MARK: - Pick flag badge
-
-struct PickFlagBadge: View {
-    let status: PickStatus
-
-    var body: some View {
-        ZStack {
-            Image(systemName: "flag.fill")
-                .font(.system(size: 17, weight: .bold))
-                .foregroundStyle(status == .accepted ? Color.black : Color.white)
-            Image(systemName: "flag.fill")
-                .font(.system(size: 14, weight: .bold))
-                .foregroundStyle(status == .accepted ? Color.white : Color.black)
-        }
-        .shadow(radius: 1)
-        .help(status == .accepted ? "Accepted" : "Rejected")
-    }
-}
-
-// MARK: - Star rating badge
-
-struct StarRatingBadge: View {
-    let rating: Int
-
-    var body: some View {
-        HStack(spacing: 2) {
-            Text("\(rating)")
+        HStack(spacing: 3) {
+            Image(systemName: "square.stack.fill")
+                .font(.system(size: 9, weight: .bold))
+            Text("×\(count)")
                 .font(.system(size: 11, weight: .bold))
-            Image(systemName: "star.fill")
-                .font(.system(size: 10, weight: .bold))
         }
-        .foregroundStyle(Color.yellow)
+        .foregroundStyle(Color.white)
         .padding(.horizontal, 6)
         .padding(.vertical, 3)
-        .background(Color.black, in: Capsule())
-        .shadow(color: .black.opacity(0.8), radius: 3, x: 0, y: 1)
-    }
-}
-
-// MARK: - Legacy FocusBadge (kept for use in detail / diagnostic views)
-
-struct FocusBadge: View {
-    let status: FocusStatus
-    let region: FocusResult.AnalysisRegion
-
-    var body: some View {
-        Image(systemName: status.systemImage)
-            .font(.system(size: 18, weight: .bold))
-            .foregroundStyle(Color(status.color))
-            .background(Circle().fill(.regularMaterial).padding(-3))
-            .shadow(radius: 2)
-            .help("\(status.rawValue) · \(region.rawValue)")
+        .background(Color.black.opacity(0.65), in: Capsule())
+        .shadow(color: .black.opacity(0.6), radius: 3, x: 0, y: 1)
     }
 }
