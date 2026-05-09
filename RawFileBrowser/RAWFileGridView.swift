@@ -7,6 +7,7 @@ struct RAWFileGridView: View {
     @State private var sortOrder: SortOrder = .name
     @State private var filterMode: FilterMode = .all
     @State private var showAnalysisConfirm = false
+    @State private var showResetConfirm = false
     @State private var xmpResultMessage: String? = nil
 
     /// When non-nil, the stack detail view is shown instead of the top-level grid.
@@ -15,6 +16,14 @@ struct RAWFileGridView: View {
     /// The ID to scroll to when returning from a stack. Set just before
     /// activeStack is cleared, then consumed by the ScrollViewReader.
     @State private var scrollToID: UUID? = nil
+
+    // ── Selection mode ───────────────────────────────────────────────────
+    /// true = the grid is in multi-select mode
+    @State private var isSelectMode: Bool = false
+    /// IDs of selected grid items (file IDs for singles, stack IDs for stacks)
+    @State private var selectedItemIDs: Set<UUID> = []
+    /// Show the multi-selection label sheet when the user long-presses a selected card
+    @State private var showMultiLabelSheet: Bool = false
 
     enum SortOrder: String, CaseIterable {
         case name = "Name"; case date = "Date"; case size = "Size"
@@ -144,6 +153,30 @@ struct RAWFileGridView: View {
         return Array(repeating: SwiftUI.GridItem(.flexible(), spacing: 12), count: count)
     }
 
+    // MARK: - Navigation helpers
+
+    /// Flat ordered list of every file ID in the current filtered grid,
+    /// with stacks expanded. Passed to detail view so the user can swipe
+    /// through all photos in grid order.
+    private var flatFileIDs: [UUID] {
+        filteredGridItems.flatMap { item -> [UUID] in
+            switch item {
+            case .single(let f): return [f.id]
+            case .stack(let s):  return s.files.map { $0.id }
+            }
+        }
+    }
+
+    /// Returns the BurstStack containing `fileID`, or nil if it is a standalone single.
+    private func stackContaining(fileID: UUID) -> BurstStack? {
+        for item in filteredGridItems {
+            if case .stack(let s) = item, s.files.contains(where: { $0.id == fileID }) {
+                return s
+            }
+        }
+        return nil
+    }
+
     // MARK: - Body
     //
     // Both the top-level grid and the stack detail view stay in the view
@@ -181,6 +214,22 @@ struct RAWFileGridView: View {
         VStack(spacing: 0) {
             if manager.isAnalyzing {
                 analysisBanner
+            }
+
+            // ── Selection mode count bar ─────────────────────────────────
+            if isSelectMode {
+                HStack {
+                    Text(selectedItemIDs.isEmpty
+                         ? "Tap photos to select"
+                         : "\(selectedItemIDs.count) selected")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 8)
+                .background(Color(.secondarySystemBackground))
+                Divider()
             }
 
             ScrollView(.horizontal, showsIndicators: false) {
@@ -233,37 +282,99 @@ struct RAWFileGridView: View {
                 BrowseSDCardButton(manager: manager).labelStyle(.iconOnly)
             }
             ToolbarItemGroup(placement: .navigationBarTrailing) {
-                if !manager.isAnalyzing {
+
+                // 1 ── Analyze Focus / Cancel
+                if !isSelectMode {
                     Button {
-                        showAnalysisConfirm = true
+                        if manager.isAnalyzing {
+                            manager.cancelAnalysis()
+                        } else {
+                            showAnalysisConfirm = true
+                        }
                     } label: {
-                        Label("Analyze Focus", systemImage: "viewfinder.circle")
+                        Label(
+                            manager.isAnalyzing ? "Cancel Analysis" : "Analyze Focus",
+                            systemImage: manager.isAnalyzing ? "xmark.circle" : "circle.dashed"
+                        )
                     }
                 }
 
-                let writeable = manager.rawFiles.filter { $0.detectedAnimalLabel != nil }
-                if !writeable.isEmpty {
+                // 2 ── Reset flags / stars / colours ─────────────────────
+                if !isSelectMode {
+                    Button {
+                        showResetConfirm = true
+                    } label: {
+                        Label("Reset All Labels", systemImage: "arrow.counterclockwise.circle")
+                    }
+                }
+
+                // 3 ── Select / Done ──────────────────────────────────────
+                Button {
+                    if isSelectMode {
+                        isSelectMode = false
+                        selectedItemIDs = []
+                    } else {
+                        isSelectMode = true
+                    }
+                } label: {
+                    Image(systemName: isSelectMode ? "checkmark.circle.fill" : "checkmark.circle")
+                }
+
+                // 4 ── Save XMP (floppy disk) ─────────────────────────────
+                if !isSelectMode {
                     Button {
                         let msg = manager.writeXMPBatch()
                         xmpResultMessage = msg
                     } label: {
-                        Label("Write Species XMP", systemImage: "tag")
+                        Label("Save XMP", systemImage: "square.and.arrow.down")
                     }
-                }
-
-                Menu {
-                    Picker("Sort", selection: $sortOrder) {
-                        ForEach(SortOrder.allCases, id: \.self) { order in
-                            Text(order.rawValue).tag(order)
-                        }
-                    }
-                } label: {
-                    Image(systemName: "arrow.up.arrow.down")
                 }
             }
         }
         .sheet(item: $selectedFile) { file in
-            RAWFileDetailView(fileID: file.id, manager: manager)
+            let ids = flatFileIDs
+            let idx = ids.firstIndex(of: file.id) ?? 0
+            RAWFileDetailView(
+                fileIDs:    ids,
+                startIndex: idx,
+                manager:    manager,
+                onDismiss: { lastViewedID in
+                    if let stack = stackContaining(fileID: lastViewedID) {
+                        activeStack = stack
+                        scrollToID  = stack.id
+                    } else {
+                        scrollToID = lastViewedID
+                    }
+                }
+            )
+        }
+        // Multi-selection label sheet — shown when user long-presses any selected card
+        .sheet(isPresented: $showMultiLabelSheet) {
+            let liveSelected: [RAWFile] = {
+                let ids = selectedItemIDs
+                // Collect the actual RAWFile objects for every selected item.
+                // For stacks, include all files in the stack.
+                var files: [RAWFile] = []
+                for item in filteredGridItems {
+                    guard ids.contains(item.id) else { continue }
+                    switch item {
+                    case .single(let f):
+                        if let live = manager.rawFiles.first(where: { $0.id == f.id }) {
+                            files.append(live)
+                        }
+                    case .stack(let s):
+                        for f in s.files {
+                            if let live = manager.rawFiles.first(where: { $0.id == f.id }) {
+                                files.append(live)
+                            }
+                        }
+                    }
+                }
+                return files
+            }()
+            MultiSelectionLabelPickerSheet(selectedFiles: liveSelected, manager: manager)
+                .presentationDetents([.height(280)])
+                .presentationDragIndicator(.visible)
         }
         .alert("XMP Written", isPresented: Binding(
             get: { xmpResultMessage != nil },
@@ -285,6 +396,18 @@ struct RAWFileGridView: View {
         } message: {
             Text("This may take a moment depending on file count.")
         }
+        .confirmationDialog(
+            "Reset all flags, stars and colours?",
+            isPresented: $showResetConfirm,
+            titleVisibility: .visible
+        ) {
+            Button("Reset All", role: .destructive) {
+                manager.resetAllLabels()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This will clear every flag, star rating and colour label on all \(manager.rawFiles.count) photos. This cannot be undone.")
+        }
     }
 
     // MARK: - Grid cell builder
@@ -293,14 +416,68 @@ struct RAWFileGridView: View {
     private func gridCell(for item: GridItem) -> some View {
         switch item {
         case .single(let file):
-            RAWFileThumbnailCard(file: file, manager: manager)
-                .onTapGesture { selectedFile = file }
-                .id("\(file.id)-\(file.focusStatus.rawValue)-\(file.pickStatus.rawValue)")
+            RAWFileThumbnailCard(
+                file: file,
+                manager: manager,
+                isSelectMode: isSelectMode,
+                isSelected: selectedItemIDs.contains(file.id),
+                onToggleSelect: { toggleSelection(of: item) }
+            )
+            .onTapGesture {
+                if isSelectMode {
+                    toggleSelection(of: item)
+                } else {
+                    selectedFile = file
+                }
+            }
+            .onLongPressGesture {
+                if isSelectMode {
+                    // If this card isn't already selected, select it too
+                    if !selectedItemIDs.contains(file.id) {
+                        selectedItemIDs.insert(file.id)
+                    }
+                    showMultiLabelSheet = true
+                }
+                // (If NOT in select mode, the card itself handles the long-press)
+            }
+            .id("\(file.id)-\(file.focusStatus.rawValue)-\(file.pickStatus.rawValue)")
 
         case .stack(let stack):
-            BurstStackCard(stack: stack, manager: manager, visibleCount: stack.files.count)
-                .onTapGesture { activeStack = stack }
-                .id(stack.id)
+            BurstStackCard(
+                stack: stack,
+                manager: manager,
+                visibleCount: stack.files.count,
+                isSelectMode: isSelectMode,
+                isSelected: selectedItemIDs.contains(stack.id),
+                onToggleSelect: { toggleSelection(of: item) }
+            )
+            .onTapGesture {
+                if isSelectMode {
+                    toggleSelection(of: item)
+                } else {
+                    activeStack = stack
+                }
+            }
+            .onLongPressGesture {
+                if isSelectMode {
+                    if !selectedItemIDs.contains(stack.id) {
+                        selectedItemIDs.insert(stack.id)
+                    }
+                    showMultiLabelSheet = true
+                }
+                // (If NOT in select mode, the card itself handles the long-press)
+            }
+            .id(stack.id)
+        }
+    }
+
+    // MARK: - Selection helpers
+
+    private func toggleSelection(of item: GridItem) {
+        if selectedItemIDs.contains(item.id) {
+            selectedItemIDs.remove(item.id)
+        } else {
+            selectedItemIDs.insert(item.id)
         }
     }
 
@@ -309,11 +486,20 @@ struct RAWFileGridView: View {
     private var analysisBanner: some View {
         VStack(spacing: 6) {
             HStack {
-                Image(systemName: "viewfinder.circle")
+                Image(systemName: "circle.dashed")
                 Text("Analyzing focus…")
                 Spacer()
                 Text("\(Int(manager.analysisProgress * 100))%")
                     .monospacedDigit()
+                Button {
+                    manager.cancelAnalysis()
+                } label: {
+                    Text("Cancel")
+                        .font(.subheadline.weight(.medium))
+                        .foregroundStyle(.red)
+                }
+                .buttonStyle(.plain)
+                .padding(.leading, 8)
             }
             .font(.subheadline.weight(.medium))
 

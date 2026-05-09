@@ -20,6 +20,11 @@ struct BurstStackCard: View {
     @ObservedObject var manager: SDCardManager
     let visibleCount: Int
 
+    // ── Selection mode support ──────────────────────────────────────────
+    var isSelectMode: Bool = false
+    var isSelected: Bool = false
+    var onToggleSelect: (() -> Void)? = nil
+
     @State private var thumbnail: UIImage?
     @State private var isLoading = true
     @State private var showActionSheet = false
@@ -129,13 +134,26 @@ struct BurstStackCard: View {
                                 .strokeBorder(outlineColor, lineWidth: 3)
                         }
                     }
+                    .overlay {
+                        // Blue selection border
+                        if isSelected {
+                            RoundedRectangle(cornerRadius: 10)
+                                .strokeBorder(Color.accentColor, lineWidth: 3)
+                        }
+                    }
                     // No offset — front card at (0,0), top-left flush
                 }
                 .frame(width: totalW, height: totalH, alignment: .topLeading)
                 .clipped()
+                // Dim when in selection mode but not selected
+                .opacity(isSelectMode && !isSelected ? 0.55 : 1.0)
             }
             .aspectRatio(4/3, contentMode: .fit)
-            .onLongPressGesture { showActionSheet = true }
+            .if(!isSelectMode) { view in
+                view.onLongPressGesture {
+                    showActionSheet = true
+                }
+            }
             .sheet(isPresented: $showActionSheet) {
                 BurstLabelPickerSheet(stack: stack, manager: manager)
                     .presentationDetents([.height(220)])

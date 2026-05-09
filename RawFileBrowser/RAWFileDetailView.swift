@@ -2,13 +2,26 @@ import SwiftUI
 import ImageIO
 
 struct RAWFileDetailView: View {
-    let fileID: UUID
+    // ── Inputs ───────────────────────────────────────────────────────────
+    /// The ordered list of file IDs the user can swipe through.
+    let fileIDs: [UUID]
+    /// Index into fileIDs to open first.
+    let startIndex: Int
     @ObservedObject var manager: SDCardManager
+    /// Called when Done is tapped, passing the UUID of the photo last on screen.
+    var onDismiss: (UUID) -> Void = { _ in }
+
+    // ── Current position ─────────────────────────────────────────────────
+    /// Tracks which photo is currently displayed. Swiping updates this.
+    @State private var currentIndex: Int
+
+    private var currentFileID: UUID { fileIDs[currentIndex] }
 
     private var file: RAWFile {
-        manager.rawFiles.first(where: { $0.id == fileID }) ?? RAWFile(url: URL(fileURLWithPath: ""))
+        manager.rawFiles.first(where: { $0.id == currentFileID })
+            ?? RAWFile(url: URL(fileURLWithPath: ""))
     }
-    
+
     @Environment(\.dismiss) private var dismiss
 
     @State private var fullImage: UIImage?
@@ -20,12 +33,16 @@ struct RAWFileDetailView: View {
     @State private var usedFallback = false
     @State private var xmpMessage: String? = nil
     @State private var showDiagnostics = false
+    @State private var showLabelSheet  = false
 
     // Zoom + pan state
     @State private var scale: CGFloat       = 1.0
     @State private var lastScale: CGFloat   = 1.0
     @State private var offset: CGSize       = .zero
     @State private var lastOffset: CGSize   = .zero
+    // Zoom percentage indicator
+    @State private var showZoomIndicator: Bool = false
+    @State private var zoomHideTask: Task<Void, Never>? = nil
 
     // Overlay toggles
     @State private var showAnalysisOverlay  = true
@@ -33,6 +50,27 @@ struct RAWFileDetailView: View {
 
     // AF point rect extracted from EXIF (normalised 0-1, top-left origin)
     @State private var afPoints: [CanonAFPoint] = []
+
+    // ── Initialiser ──────────────────────────────────────────────────────
+    init(fileIDs: [UUID],
+         startIndex: Int,
+         manager: SDCardManager,
+         onDismiss: @escaping (UUID) -> Void = { _ in }) {
+        self.fileIDs    = fileIDs
+        self.startIndex = startIndex
+        self.manager    = manager
+        self.onDismiss  = onDismiss
+        // @State must be initialised via _varName in an init
+        _currentIndex   = State(initialValue: startIndex)
+    }
+
+    // ── Convenience init for single-file callers (backwards compatibility) ──
+    /// Opens a single file with no swipe neighbours and no dismiss callback.
+    init(fileID: UUID, manager: SDCardManager) {
+        self.init(fileIDs: [fileID], startIndex: 0, manager: manager)
+    }
+
+    // MARK: - Body
 
     var body: some View {
         NavigationStack {
@@ -55,20 +93,27 @@ struct RAWFileDetailView: View {
                                 .frame(width: geo.size.width, height: geo.size.height)
                                 .scaleEffect(scale)
                                 .offset(offset)
-                                // Combined pinch + pan
+                                // Combined pinch + pan + swipe navigation
                                 .gesture(
                                     SimultaneousGesture(
                                         MagnificationGesture()
                                             .onChanged { val in
                                                 let newScale = max(1.0, lastScale * val)
                                                 scale = newScale
-                                                // Clamp offset so we don't pan outside bounds
                                                 offset = clampedOffset(
                                                     offset: lastOffset,
                                                     scale: newScale,
                                                     containerSize: geo.size,
                                                     imageSize: img.size
                                                 )
+                                                showZoomIndicator = true
+                                                zoomHideTask?.cancel()
+                                                zoomHideTask = Task {
+                                                    try? await Task.sleep(nanoseconds: 1_500_000_000)
+                                                    if !Task.isCancelled {
+                                                        withAnimation { showZoomIndicator = false }
+                                                    }
+                                                }
                                             }
                                             .onEnded { _ in
                                                 lastScale  = scale
@@ -93,8 +138,35 @@ struct RAWFileDetailView: View {
                                             }
                                     )
                                 )
-                                // Double-tap to toggle zoom
+                                // Swipe left / right to navigate (only when not zoomed in)
+                                .simultaneousGesture(
+                                    DragGesture(minimumDistance: 40)
+                                        .onEnded { val in
+                                            // Only act when the image is at normal zoom;
+                                            // at zoom > 1 the drag gesture above handles panning.
+                                            guard scale <= 1.0 else { return }
+                                            let horizontal = val.translation.width
+                                            let vertical   = abs(val.translation.height)
+                                            // Require the swipe to be more horizontal than vertical
+                                            guard abs(horizontal) > vertical else { return }
+                                            if horizontal < 0 {
+                                                // Swipe left → next photo
+                                                navigateTo(currentIndex + 1)
+                                            } else {
+                                                // Swipe right → previous photo
+                                                navigateTo(currentIndex - 1)
+                                            }
+                                        }
+                                )
+                                // Double-tap → 50% actual image size (or reset if already zoomed)
                                 .onTapGesture(count: 2) {
+                                    let imageAspect     = img.size.width / img.size.height
+                                    let containerAspect = geo.size.width / geo.size.height
+                                    let fitRenderedW: CGFloat = imageAspect > containerAspect
+                                        ? geo.size.width
+                                        : geo.size.height * imageAspect
+                                    let fitFactor = fitRenderedW / img.size.width
+                                    let target50 = max(1.0, 0.5 / fitFactor)
                                     withAnimation(.spring(response: 0.35)) {
                                         if scale > 1.0 {
                                             scale      = 1.0
@@ -102,8 +174,45 @@ struct RAWFileDetailView: View {
                                             offset     = .zero
                                             lastOffset = .zero
                                         } else {
-                                            scale     = 3.0
-                                            lastScale = 3.0
+                                            scale     = target50
+                                            lastScale = target50
+                                        }
+                                    }
+                                    showZoomIndicator = true
+                                    zoomHideTask?.cancel()
+                                    zoomHideTask = Task {
+                                        try? await Task.sleep(nanoseconds: 1_500_000_000)
+                                        if !Task.isCancelled {
+                                            withAnimation { showZoomIndicator = false }
+                                        }
+                                    }
+                                }
+                                // Triple-tap → 100% actual image size (or reset if already at 100%)
+                                .onTapGesture(count: 3) {
+                                    let imageAspect     = img.size.width / img.size.height
+                                    let containerAspect = geo.size.width / geo.size.height
+                                    let fitRenderedW: CGFloat = imageAspect > containerAspect
+                                        ? geo.size.width
+                                        : geo.size.height * imageAspect
+                                    let fitFactor = fitRenderedW / img.size.width
+                                    let target100 = max(1.0, 1.0 / fitFactor)
+                                    withAnimation(.spring(response: 0.35)) {
+                                        if scale >= target100 * 0.95 {
+                                            scale      = 1.0
+                                            lastScale  = 1.0
+                                            offset     = .zero
+                                            lastOffset = .zero
+                                        } else {
+                                            scale     = target100
+                                            lastScale = target100
+                                        }
+                                    }
+                                    showZoomIndicator = true
+                                    zoomHideTask?.cancel()
+                                    zoomHideTask = Task {
+                                        try? await Task.sleep(nanoseconds: 1_500_000_000)
+                                        if !Task.isCancelled {
+                                            withAnimation { showZoomIndicator = false }
                                         }
                                     }
                                 }
@@ -136,6 +245,36 @@ struct RAWFileDetailView: View {
                             // Exposure badge — top-left corner, always visible
                             exposureBadge
                                 .padding(10)
+
+                            // Zoom percentage badge — centred, shown briefly after zoom change.
+                            // Percentage is relative to actual image pixel size:
+                            //   100% = one screen point per image point.
+                            if showZoomIndicator {
+                                let imageAspect     = img.size.width / img.size.height
+                                let containerAspect = geo.size.width / geo.size.height
+                                let fitRenderedW: CGFloat = imageAspect > containerAspect
+                                    ? geo.size.width
+                                    : geo.size.height * imageAspect
+                                let fitFactor = fitRenderedW / img.size.width
+                                let actualPct = Int((fitFactor * scale * 100).rounded())
+                                VStack {
+                                    Spacer()
+                                    HStack {
+                                        Spacer()
+                                        Text("\(actualPct)%")
+                                            .font(.system(size: 14, weight: .semibold, design: .monospaced))
+                                            .foregroundStyle(.white)
+                                            .padding(.horizontal, 10)
+                                            .padding(.vertical, 6)
+                                            .background(.black.opacity(0.55))
+                                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                                        Spacer()
+                                    }
+                                    Spacer()
+                                }
+                                .allowsHitTesting(false)
+                                .transition(.opacity)
+                            }
                         }
                     }
 
@@ -161,8 +300,22 @@ struct RAWFileDetailView: View {
             .toolbarColorScheme(.dark, for: .navigationBar)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Done") { dismiss() }.foregroundStyle(.white)
+                    Button("Done") {
+                        onDismiss(currentFileID)
+                        dismiss()
+                    }
+                    .foregroundStyle(.white)
                 }
+
+                // ── Photo counter (e.g. "3 / 12") ───────────────────────
+                if fileIDs.count > 1 {
+                    ToolbarItem(placement: .principal) {
+                        Text("\(currentIndex + 1) / \(fileIDs.count)")
+                            .font(.caption)
+                            .foregroundStyle(.white.opacity(0.7))
+                    }
+                }
+
                 ToolbarItemGroup(placement: .navigationBarTrailing) {
 
                     // Analysis region overlay toggle
@@ -191,7 +344,7 @@ struct RAWFileDetailView: View {
                         Button {
                             Task { await manager.analyzeFocus(for: file) }
                         } label: {
-                            Image(systemName: "wand.and.stars")
+                            Image(systemName: "circle.dashed")
                         }.foregroundStyle(.white)
                     }
 
@@ -226,6 +379,12 @@ struct RAWFileDetailView: View {
                         }
                         .foregroundStyle(file.xmpWritten ? .green : .white)
                     }
+
+                    // Label / pick sheet button — always visible, reflects pick state
+                    Button { showLabelSheet = true } label: {
+                        Image(systemName: file.pickStatus != .unpicked ? "flag.fill" : "flag")
+                            .foregroundStyle(.white)
+                    }
                 }
             }
             .sheet(isPresented: $showMetadata) {
@@ -239,6 +398,11 @@ struct RAWFileDetailView: View {
             .sheet(isPresented: $showShareSheet) {
                 if let img = fullImage { ShareSheet(items: [img, file.url]) }
             }
+            .sheet(isPresented: $showLabelSheet) {
+                LabelPickerSheet(file: file, manager: manager)
+                    .presentationDetents([.height(220)])
+                    .presentationDragIndicator(.visible)
+            }
         }
         .alert("XMP Sidecar", isPresented: Binding(
             get: { xmpMessage != nil },
@@ -248,18 +412,33 @@ struct RAWFileDetailView: View {
         } message: {
             Text(xmpMessage ?? "")
         }
-        .task { await loadFullImage() }
+        .task(id: currentFileID) {
+            // Reload the image every time currentFileID changes (i.e. after a swipe)
+            await loadFullImage()
+        }
+    }
+
+    // MARK: - Swipe navigation
+
+    /// Moves to a new index, resetting zoom/pan and reloading the image.
+    private func navigateTo(_ newIndex: Int) {
+        guard newIndex >= 0, newIndex < fileIDs.count else { return }
+        // Reset zoom so the new photo starts at fit-to-screen
+        scale      = 1.0
+        lastScale  = 1.0
+        offset     = .zero
+        lastOffset = .zero
+        currentIndex = newIndex
+        // The .task(id: currentFileID) above will automatically re-fire
+        // and call loadFullImage() because currentFileID has changed.
     }
 
     // MARK: - Pan clamping
 
-    /// Clamps a proposed offset so the image never reveals black bars
-    /// when zoomed in — the image edge always stays at or beyond the container edge.
     private func clampedOffset(offset: CGSize,
                                 scale: CGFloat,
                                 containerSize: CGSize,
                                 imageSize: CGSize) -> CGSize {
-        // Compute how much of the image is visible at this scale
         let imageAspect     = imageSize.width / imageSize.height
         let containerAspect = containerSize.width / containerSize.height
 
@@ -275,7 +454,6 @@ struct RAWFileDetailView: View {
         let scaledW = renderedW * scale
         let scaledH = renderedH * scale
 
-        // Maximum allowable offset in each direction
         let maxX = max(0, (scaledW - containerSize.width)  / 2)
         let maxY = max(0, (scaledH - containerSize.height) / 2)
 
@@ -290,29 +468,72 @@ struct RAWFileDetailView: View {
     @ViewBuilder
     private var infoBar: some View {
         VStack(spacing: 4) {
+
+            // ── Label status strip: flag · stars · colour ────────────────
+            // Always visible. Tapping opens the LabelPickerSheet.
+            // Items dim when unset so the strip is always a clear tap target.
+            Button { showLabelSheet = true } label: {
+                HStack(spacing: 12) {
+
+                    // Pick flag — two-tone when set, dim outline when not
+                    if file.pickStatus != .unpicked {
+                        PickFlagBadge(status: file.pickStatus)
+                    } else {
+                        Image(systemName: "flag")
+                            .font(.system(size: 14))
+                            .foregroundStyle(.white.opacity(0.3))
+                    }
+
+                    // Stars — filled yellow when set, dim outlines when not
+                    HStack(spacing: 3) {
+                        ForEach(1...5, id: \.self) { n in
+                            Image(systemName: n <= file.starRating ? "star.fill" : "star")
+                                .font(.system(size: 11))
+                                .foregroundStyle(n <= file.starRating
+                                    ? Color.yellow
+                                    : Color.white.opacity(0.25))
+                        }
+                    }
+
+                    // Colour swatch — filled when set, dim ring when not
+                    if let swatchColor = file.labelColour.swiftUIColor {
+                        Circle()
+                            .fill(swatchColor)
+                            .frame(width: 14, height: 14)
+                            .background(Circle().fill(.regularMaterial).padding(-2))
+                            .shadow(radius: 1)
+                    } else {
+                        Circle()
+                            .strokeBorder(.white.opacity(0.25), lineWidth: 1.5)
+                            .frame(width: 14, height: 14)
+                    }
+                }
+            }
+            .buttonStyle(.plain)
             if file.focusStatus != .unanalyzed {
-                VStack(spacing: 4) {
+                VStack(spacing: 5) {
                     if let label = file.detectedAnimalLabel {
                         HStack(spacing: 4) {
                             Image(systemName: "pawprint.fill")
-                            Text(label.capitalized).fontWeight(.medium)
+                            Text(label.replacingOccurrences(of: "_", with: " ").capitalized)
+                                .fontWeight(.medium)
                             if let conf = file.detectionConfidence {
-                                Text("YOLO \(Int(conf * 100))%").foregroundStyle(.cyan.opacity(0.7))
+                                Text("\(Int(conf * 100))%").foregroundStyle(.cyan.opacity(0.7))
                             } else {
                                 Text("Vision").foregroundStyle(.cyan.opacity(0.7))
                             }
                         }
-                        .font(.caption).foregroundStyle(.cyan)
+                        .font(.subheadline).foregroundStyle(.cyan)
                     }
 
                     HStack(spacing: 6) {
-                        Image(systemName: file.focusStatus.systemImage)
+                        Image(systemName: "circle.dashed")
                             .foregroundStyle(Color(file.focusStatus.color))
                         Text(file.focusStatus.rawValue).fontWeight(.medium)
                         Text("·")
                         Text(file.focusRegion.rawValue).foregroundStyle(.secondary)
                     }
-                    .font(.caption)
+                    .font(.subheadline)
 
                     // "AF not on subject" warning — shown regardless of sharpness
                     if file.afNotOnSubject {
@@ -321,13 +542,16 @@ struct RAWFileDetailView: View {
                                   systemImage: "scope")
                                 .foregroundStyle(.purple)
                         }
-                        .font(.caption2)
+                        .font(.caption)
                     }
 
                     if file.focusStatus != .sharp {
                         HStack(spacing: 6) {
                             if file.blurType != .none && file.blurType != .unknown {
-                                Label(file.blurType.rawValue,
+                                let blurLabel = file.blurType == .mixed
+                                    ? "Mixed (motion + defocus)"
+                                    : file.blurType.rawValue
+                                Label(blurLabel,
                                       systemImage: file.blurType == .motionBlur
                                           ? "arrow.left.and.right" : "scope")
                                     .foregroundStyle(.orange)
@@ -338,7 +562,7 @@ struct RAWFileDetailView: View {
                                     .foregroundStyle(.yellow)
                             }
                         }
-                        .font(.caption2)
+                        .font(.caption)
                     }
 
                     // AF-on-eye indicator — shown whenever an eye was detected,
@@ -352,43 +576,53 @@ struct RAWFileDetailView: View {
                             Text(afOnEye ? "AF on eye" : "AF missed eye")
                                 .foregroundStyle(afOnEye ? .green : .orange)
                         }
-                        .font(.caption2)
+                        .font(.caption)
                     }
                 }
             }
 
-            // ISO noise indicator
-            if let iso = isoValue {
-                let level = classifyISO(iso)
-                HStack(spacing: 6) {
-                    Image(systemName: level.systemImage)
-                        .foregroundStyle(level.color)
-                    Text("ISO \(iso)")
-                        .fontWeight(.medium)
-                    Text("·")
-                    Text(level.label)
-                        .foregroundStyle(.secondary)
-                }
-                .font(.caption2)
-            }
+            // ISO and shutter warnings — only shown for blurry photos where
+            // they may be contributing causes. Not shown for sharp photos.
+            let isBlurry = file.focusStatus == .slightlyBlur || file.focusStatus == .blurry
+            if isBlurry {
 
-            // Shutter speed indicator
-            if let shutter = shutterSpeedSeconds {
-                let level = classifyShutter(shutter, focalLength: focalLengthMM)
-                HStack(spacing: 6) {
-                    Image(systemName: level.systemImage)
-                        .foregroundStyle(level.color)
-                    Text(formatShutter(shutter))
-                        .fontWeight(.medium)
-                    if let fl = focalLengthMM {
-                        Text("@ \(Int(fl))mm")
-                            .foregroundStyle(.secondary)
+                // ISO noise indicator — only if high enough to contribute to blur
+                if let iso = isoValue {
+                    let level = classifyISO(iso)
+                    if level != .low {
+                        HStack(spacing: 6) {
+                            Image(systemName: level.systemImage)
+                                .foregroundStyle(level.color)
+                            Text("ISO \(iso)")
+                                .fontWeight(.medium)
+                            Text("·")
+                            Text(level.label)
+                                .foregroundStyle(.secondary)
+                        }
+                        .font(.caption)
                     }
-                    Text("·")
-                    Text(level.label)
-                        .foregroundStyle(.secondary)
                 }
-                .font(.caption2)
+
+                // Shutter speed indicator — only if slow enough to contribute to blur
+                if let shutter = shutterSpeedSeconds {
+                    let level = classifyShutter(shutter, focalLength: focalLengthMM)
+                    if level != .fast {
+                        HStack(spacing: 6) {
+                            Image(systemName: level.systemImage)
+                                .foregroundStyle(level.color)
+                            Text(formatShutter(shutter))
+                                .fontWeight(.medium)
+                            if let fl = focalLengthMM {
+                                Text("@ \(Int(fl))mm")
+                                    .foregroundStyle(.secondary)
+                            }
+                            Text("·")
+                            Text(level.label)
+                                .foregroundStyle(.secondary)
+                        }
+                        .font(.caption)
+                    }
+                }
             }
 
             if usedFallback {
@@ -400,12 +634,13 @@ struct RAWFileDetailView: View {
                 .foregroundStyle(.white.opacity(0.8))
             }
 
-            // Pan hint — shown only when zoomed in
-            if scale > 1.01 {
-                Text("Drag to pan")
-                    .font(.caption2)
-                    .foregroundStyle(.white.opacity(0.5))
+            // Exposure histogram
+            if let img = fullImage {
+                HistogramView(image: img)
+                    .frame(height: 40)
+                    .padding(.top, 2)
             }
+
         }
         .padding(10)
         .background(.ultraThinMaterial)
@@ -455,10 +690,13 @@ struct RAWFileDetailView: View {
         if let iso = isoValue {
             items.append(ExposureItem(label: "ISO", value: "\(iso)"))
         }
+        if let fl = focalLengthMM {
+            items.append(ExposureItem(label: "FOCAL", value: "\(Int(fl))mm"))
+        }
         return items
     }
 
-    // MARK: - ISO noise assessment
+    // MARK: - Metadata helpers
 
     /// Look up a metadata value by trying exact keys first, then suffix-matching
     /// the nested "{Exif} > Key" format that RAWImageLoader produces on this device.
@@ -477,6 +715,29 @@ struct RAWFileDetailView: View {
         }
         return nil
     }
+
+    /// Returns shutter speed as decimal seconds (e.g. 0.002 for 1/500s).
+    private var shutterSpeedSeconds: Double? {
+        guard let raw = metadataValue(for: "ExposureTime", "Exposure Time") else { return nil }
+        return Double(raw)
+    }
+
+    /// Returns focal length in mm.
+    private var focalLengthMM: Double? {
+        guard let raw = metadataValue(for: "FocalLength", "Focal Length") else { return nil }
+        return Double(raw)
+    }
+
+    /// Returns aperture as a formatted string (e.g. "6.3").
+    private var apertureValue: String? {
+        guard let raw = metadataValue(for: "FNumber", "F Number", "ApertureValue") else { return nil }
+        guard let f = Double(raw) else { return nil }
+        return f.truncatingRemainder(dividingBy: 1) == 0
+            ? String(Int(f))
+            : String(format: "%.1f", f)
+    }
+
+    // MARK: - ISO noise assessment
 
     private enum ISOLevel {
         case low, moderate, high, veryHigh
@@ -520,27 +781,6 @@ struct RAWFileDetailView: View {
     }
 
     // MARK: - Shutter speed assessment
-
-    /// Returns shutter speed as decimal seconds (e.g. 0.002 for 1/500s).
-    private var shutterSpeedSeconds: Double? {
-        guard let raw = metadataValue(for: "ExposureTime", "Exposure Time") else { return nil }
-        return Double(raw)
-    }
-
-    /// Returns focal length in mm.
-    private var focalLengthMM: Double? {
-        guard let raw = metadataValue(for: "FocalLength", "Focal Length") else { return nil }
-        return Double(raw)
-    }
-
-    /// Returns aperture as a formatted string (e.g. "6.3").
-    private var apertureValue: String? {
-        guard let raw = metadataValue(for: "FNumber", "F Number", "ApertureValue") else { return nil }
-        guard let f = Double(raw) else { return nil }
-        return f.truncatingRemainder(dividingBy: 1) == 0
-            ? String(Int(f))
-            : String(format: "%.1f", f)
-    }
 
     private enum ShutterLevel {
         case fast, adequate, marginal, slow
@@ -594,7 +834,6 @@ struct RAWFileDetailView: View {
         }
     }
 
-    /// Formats a shutter speed in seconds as a human-readable string.
     private func formatShutter(_ seconds: Double) -> String {
         if seconds < 1.0 {
             let denom = Int((1.0 / seconds).rounded())
@@ -607,8 +846,12 @@ struct RAWFileDetailView: View {
     // MARK: - Image loading
 
     private func loadFullImage() async {
-        isLoading = true
-        let url   = file.url
+        isLoading    = true
+        fullImage    = nil
+        loadError    = nil
+        afPoints     = []
+
+        let url = file.url
 
         let extractedPoints: [CanonAFPoint] = await Task.detached(priority: .userInitiated) {
             CanonMakernoteParser.extractAFPoints(from: url) ?? []
@@ -630,8 +873,6 @@ struct RAWFileDetailView: View {
 
 // MARK: - AF Point Overlay
 
-/// Draws Canon AF points parsed from the Makernote.
-/// In-focus points are shown in green, others in white.
 struct AFPointOverlay: View {
     let points: [CanonAFPoint]
     let imageSize: CGSize
@@ -734,11 +975,74 @@ struct ShareSheet: UIViewControllerRepresentable {
     func updateUIViewController(_ vc: UIActivityViewController, context: Context) {}
 }
 
+// MARK: - Exposure Histogram
+
+/// A simple luminance histogram rendered from the loaded image.
+/// Samples a small downscaled copy of the image for speed, then
+/// renders 256 bars from black (left) to white (right).
+struct HistogramView: View {
+    let image: UIImage
+
+    private var buckets: [CGFloat] {
+        guard let cgImage = image.cgImage else { return Array(repeating: 0, count: 256) }
+        let width  = cgImage.width
+        let height = cgImage.height
+        let scale  = min(1.0, 200.0 / Double(width))
+        let sw     = max(1, Int(Double(width)  * scale))
+        let sh     = max(1, Int(Double(height) * scale))
+        let bytesPerRow = sw * 4
+        var data   = [UInt8](repeating: 0, count: sh * bytesPerRow)
+        guard let ctx = CGContext(
+            data: &data,
+            width: sw, height: sh,
+            bitsPerComponent: 8,
+            bytesPerRow: bytesPerRow,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { return Array(repeating: 0, count: 256) }
+        ctx.draw(cgImage, in: CGRect(x: 0, y: 0, width: sw, height: sh))
+        var counts = [Int](repeating: 0, count: 256)
+        for py in 0..<sh {
+            for px in 0..<sw {
+                let base = py * bytesPerRow + px * 4
+                let r = Double(data[base])
+                let g = Double(data[base + 1])
+                let b = Double(data[base + 2])
+                // Standard luminance weighting (ITU-R BT.709)
+                let lum = 0.2126 * r + 0.7152 * g + 0.0722 * b
+                counts[min(255, Int(lum))] += 1
+            }
+        }
+        let maxCount = counts.max() ?? 1
+        return counts.map { CGFloat($0) / CGFloat(maxCount) }
+    }
+
+    var body: some View {
+        Canvas { ctx, size in
+            let b = buckets
+            let barW = size.width / CGFloat(b.count)
+            for (i, height) in b.enumerated() {
+                let barH = height * size.height
+                let rect = CGRect(
+                    x: CGFloat(i) * barW,
+                    y: size.height - barH,
+                    width: max(1, barW - 0.5),
+                    height: barH
+                )
+                ctx.fill(Path(rect), with: .color(.white.opacity(0.75)))
+            }
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 4))
+        .overlay(
+            RoundedRectangle(cornerRadius: 4)
+                .strokeBorder(.white.opacity(0.15), lineWidth: 0.5)
+        )
+    }
+}
+
 // MARK: - CGRect screen projection helper
 
 extension CGRect {
-    /// Projects a normalised (0-1) rect onto screen coordinates,
-    /// accounting for letterboxing, zoom scale and pan offset.
     func projectedToScreen(normRect: CGRect, scale: CGFloat, offset: CGSize) -> CGRect {
         let cx = midX, cy = midY
         let scaledW = width  * scale
@@ -753,6 +1057,7 @@ extension CGRect {
             height: normRect.height * scaledH
         )
     }
+
     func projectedToScreenAFPoint(normRect: CGRect, scale: CGFloat, offset: CGSize) -> CGRect {
         let cx = midX, cy = midY
         let scaledW = width  * scale
@@ -760,19 +1065,13 @@ extension CGRect {
         let originX = cx - scaledW / 2 + offset.width
         let originY = cy - scaledH / 2 + offset.height
 
-        // The AF point is physically square on the sensor.
-        // normW was normalised against sensor width; use it for both axes
-        // so the bracket displays as a square regardless of image orientation.
         let screenSize = normRect.width * scaledW
         let screenX    = originX + normRect.minX * scaledW
-        let screenCY   = originY + normRect.midY * scaledH   // Y centre uses scaledH (correct)
+        let screenCY   = originY + normRect.midY * scaledH
 
         return CGRect(x: screenX,
                       y: screenCY - screenSize / 2,
                       width:  screenSize,
                       height: screenSize)
     }
-
 }
-/// Projects AF point normRects where both width and height were normalised
-/// against sensor width, so both axes must scale against scaledW to stay square.

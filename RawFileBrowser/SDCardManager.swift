@@ -213,9 +213,16 @@ final class SDCardManager: ObservableObject {
 
     // MARK: Focus Analysis
 
+    private var analysisCancelled = false
+
+    func cancelAnalysis() {
+        analysisCancelled = true
+    }
+
     func analyzeAllFocus() async {
         guard !rawFiles.isEmpty else { return }
         isAnalyzing = true
+        analysisCancelled = false
         analysisProgress = 0
 
         let sharpen = settings?.sharpenIntensity ?? 0.4
@@ -224,6 +231,10 @@ final class SDCardManager: ObservableObject {
         let batchSize = 4
 
         for batchStart in stride(from: 0, to: total, by: batchSize) {
+
+            // Stop between batches if the user cancelled
+            if analysisCancelled { break }
+
             let batchEnd = min(batchStart + batchSize, total)
             let indices = Array(batchStart..<batchEnd)
 
@@ -269,11 +280,11 @@ final class SDCardManager: ObservableObject {
         }
 
         isAnalyzing = false
+        analysisCancelled = false
 
         // Rebuild gridItems so stack cover photos reflect updated analysis state
         gridItems = groupIntoBursts(rawFiles)
     }
-
     func analyzeFocus(for file: RAWFile) async {
         guard let idx = rawFiles.firstIndex(where: { $0.id == file.id }) else { return }
         let result = await FocusAnalyzer.analyze(url: file.url,
@@ -353,6 +364,47 @@ final class SDCardManager: ObservableObject {
     /// Set the same colour label on every file in a burst stack.
     func setLabelColour(_ colour: LabelColour, forAllIn stack: BurstStack) {
         for file in stack.files {
+            guard let idx = rawFiles.firstIndex(where: { $0.id == file.id }) else { continue }
+            rawFiles[idx].labelColour = colour
+        }
+        gridItems = groupIntoBursts(rawFiles)
+    }
+
+    // MARK: - Batch setters for arbitrary file sets (used by multi-selection)
+
+    /// Clear all flags, star ratings, and colour labels on every file.
+    func resetAllLabels() {
+        for idx in rawFiles.indices {
+            rawFiles[idx].pickStatus = .unpicked
+            rawFiles[idx].pickIsOverridden = false
+            rawFiles[idx].starRating = 0
+            rawFiles[idx].labelColour = .none
+        }
+        gridItems = groupIntoBursts(rawFiles)
+    }
+
+    /// Apply a pick status to every file in the supplied array.
+    func setPickStatus(_ status: PickStatus, forFiles files: [RAWFile]) {
+        for file in files {
+            guard let idx = rawFiles.firstIndex(where: { $0.id == file.id }) else { continue }
+            rawFiles[idx].pickStatus = status
+            rawFiles[idx].pickIsOverridden = (status != .unpicked)
+        }
+        gridItems = groupIntoBursts(rawFiles)
+    }
+
+    /// Apply a star rating to every file in the supplied array.
+    func setStarRating(_ rating: Int, forFiles files: [RAWFile]) {
+        for file in files {
+            guard let idx = rawFiles.firstIndex(where: { $0.id == file.id }) else { continue }
+            rawFiles[idx].starRating = min(max(rating, 0), 5)
+        }
+        gridItems = groupIntoBursts(rawFiles)
+    }
+
+    /// Apply a colour label to every file in the supplied array.
+    func setLabelColour(_ colour: LabelColour, forFiles files: [RAWFile]) {
+        for file in files {
             guard let idx = rawFiles.firstIndex(where: { $0.id == file.id }) else { continue }
             rawFiles[idx].labelColour = colour
         }

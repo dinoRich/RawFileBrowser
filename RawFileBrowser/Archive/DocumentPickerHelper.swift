@@ -46,7 +46,7 @@ struct BrowseSDCardButton: View {
         Button {
             showPicker = true
         } label: {
-            Label("Browse", systemImage: "externaldrive")
+            Label("Browse SD Card", systemImage: "sdcard")
                 .font(.headline)
                 .padding()
                 .frame(maxWidth: .infinity)

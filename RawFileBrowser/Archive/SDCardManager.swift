@@ -131,6 +131,10 @@ private let burstGapThreshold: TimeInterval = 2.0
 
 @MainActor
 final class SDCardManager: ObservableObject {
+    /// Assigned once from ContentView.onAppear. The manager reads from this
+    /// directly whenever analysis runs, so it always sees current values.
+    var settings: AppSettings?
+
     @Published var rawFiles: [RAWFile] = []
 
     /// The grouped representation used by the top-level grid.
@@ -214,6 +218,8 @@ final class SDCardManager: ObservableObject {
         isAnalyzing = true
         analysisProgress = 0
 
+        let sharpen = settings?.sharpenIntensity ?? 0.4
+
         let total = rawFiles.count
         let batchSize = 4
 
@@ -225,7 +231,7 @@ final class SDCardManager: ObservableObject {
                 for i in indices {
                     let url = rawFiles[i].url
                     group.addTask {
-                        let result = await FocusAnalyzer.analyze(url: url)
+                        let result = await FocusAnalyzer.analyze(url: url, sharpenIntensity: sharpen)
                         return (i, result)
                     }
                 }
@@ -251,7 +257,10 @@ final class SDCardManager: ObservableObject {
                     rawFiles[i].subjectBodyRawScore   = result.subjectBodyRawScore
                     rawFiles[i].ratingBasis           = result.ratingBasis
                     if !rawFiles[i].pickIsOverridden {
-                        rawFiles[i].pickStatus = result.status.isRejected ? .rejected : .accepted
+                        resetOutcomeFields(at: i)
+                        if let action = settings?.action(for: result.status) {
+                            applyOutcomeAction(action, to: i)
+                        }
                     }
                 }
             }
@@ -267,7 +276,8 @@ final class SDCardManager: ObservableObject {
 
     func analyzeFocus(for file: RAWFile) async {
         guard let idx = rawFiles.firstIndex(where: { $0.id == file.id }) else { return }
-        let result = await FocusAnalyzer.analyze(url: file.url)
+        let result = await FocusAnalyzer.analyze(url: file.url,
+                                                  sharpenIntensity: settings?.sharpenIntensity ?? 0.4)
         rawFiles[idx].focusStatus           = result.status
         rawFiles[idx].focusScore            = result.score
         rawFiles[idx].focusRegion           = result.analysisRegion
@@ -290,7 +300,10 @@ final class SDCardManager: ObservableObject {
         rawFiles[idx].subjectBodyRawScore   = result.subjectBodyRawScore
         rawFiles[idx].ratingBasis           = result.ratingBasis
         if !rawFiles[idx].pickIsOverridden {
-            rawFiles[idx].pickStatus = result.status.isRejected ? .rejected : .accepted
+            resetOutcomeFields(at: idx)
+            if let action = settings?.action(for: result.status) {
+                applyOutcomeAction(action, to: idx)
+            }
         }
         gridItems = groupIntoBursts(rawFiles)
     }
@@ -340,6 +353,36 @@ final class SDCardManager: ObservableObject {
     /// Set the same colour label on every file in a burst stack.
     func setLabelColour(_ colour: LabelColour, forAllIn stack: BurstStack) {
         for file in stack.files {
+            guard let idx = rawFiles.firstIndex(where: { $0.id == file.id }) else { continue }
+            rawFiles[idx].labelColour = colour
+        }
+        gridItems = groupIntoBursts(rawFiles)
+    }
+
+    // MARK: - Batch setters for arbitrary file sets (used by multi-selection)
+
+    /// Apply a pick status to every file in the supplied array.
+    func setPickStatus(_ status: PickStatus, forFiles files: [RAWFile]) {
+        for file in files {
+            guard let idx = rawFiles.firstIndex(where: { $0.id == file.id }) else { continue }
+            rawFiles[idx].pickStatus = status
+            rawFiles[idx].pickIsOverridden = (status != .unpicked)
+        }
+        gridItems = groupIntoBursts(rawFiles)
+    }
+
+    /// Apply a star rating to every file in the supplied array.
+    func setStarRating(_ rating: Int, forFiles files: [RAWFile]) {
+        for file in files {
+            guard let idx = rawFiles.firstIndex(where: { $0.id == file.id }) else { continue }
+            rawFiles[idx].starRating = min(max(rating, 0), 5)
+        }
+        gridItems = groupIntoBursts(rawFiles)
+    }
+
+    /// Apply a colour label to every file in the supplied array.
+    func setLabelColour(_ colour: LabelColour, forFiles files: [RAWFile]) {
+        for file in files {
             guard let idx = rawFiles.firstIndex(where: { $0.id == file.id }) else { continue }
             rawFiles[idx].labelColour = colour
         }
@@ -474,6 +517,24 @@ final class SDCardManager: ObservableObject {
             results += collectRAWFiles(in: dcim)
         }
         return results
+    }
+
+    private func resetOutcomeFields(at idx: Int) {
+        rawFiles[idx].pickStatus  = .unpicked
+        rawFiles[idx].starRating  = 0
+        rawFiles[idx].labelColour = .none
+    }
+
+    private func applyOutcomeAction(_ action: FocusOutcomeAction, to idx: Int) {
+        if action.pick != .unpicked {
+            rawFiles[idx].pickStatus = action.pick
+        }
+        if action.stars > 0 {
+            rawFiles[idx].starRating = action.stars
+        }
+        if action.colour != .none {
+            rawFiles[idx].labelColour = action.colour
+        }
     }
 
     private func detectExternalVolumes() -> Bool {

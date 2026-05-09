@@ -22,11 +22,7 @@ struct ContentView: View {
                         Image(systemName: "gearshape")
                     }
                 }
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    Button { sdCardManager.forceRefresh() } label: {
-                        Image(systemName: "arrow.clockwise")
-                    }
-                }
+
             }
             .sheet(isPresented: $showSettings) {
                 SettingsView()

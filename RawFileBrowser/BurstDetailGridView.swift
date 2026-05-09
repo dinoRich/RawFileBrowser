@@ -15,6 +15,9 @@ struct BurstDetailGridView: View {
     @State private var selectedFile: RAWFile?
     @State private var filterMode: RAWFileGridView.FilterMode = .all
 
+    /// ID of the thumbnail to scroll to after returning from detail view.
+    @State private var scrollToID: String? = nil
+
     // MARK: - Derived data
 
     /// Live versions of this stack's files, so badges update in real time.
@@ -88,17 +91,27 @@ struct BurstDetailGridView: View {
             if filteredFiles.isEmpty {
                 emptyState
             } else {
-                ScrollView {
-                    LazyVGrid(columns: columns, spacing: 12) {
-                        ForEach(filteredFiles) { file in
-                            RAWFileThumbnailCard(file: file, manager: manager)
-                                .onTapGesture { selectedFile = file }
-                                .id("\(file.id)-\(file.focusStatus.rawValue)-\(file.pickStatus.rawValue)")
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        LazyVGrid(columns: columns, spacing: 12) {
+                            ForEach(filteredFiles) { file in
+                                RAWFileThumbnailCard(file: file, manager: manager)
+                                    .onTapGesture { selectedFile = file }
+                                    .id("\(file.id)-\(file.focusStatus.rawValue)-\(file.pickStatus.rawValue)")
+                            }
                         }
+                        .padding()
                     }
-                    .padding()
+                    .background(Color(.systemGray6))
+                    // Scroll to the last-viewed photo when returning from detail view.
+                    .onChange(of: scrollToID) { targetID in
+                        guard let id = targetID else { return }
+                        withAnimation {
+                            proxy.scrollTo(id, anchor: .center)
+                        }
+                        scrollToID = nil
+                    }
                 }
-                .background(Color(.systemGray6))
             }
         }
         .navigationTitle("Burst (\(stack.count) photos)")
@@ -120,8 +133,24 @@ struct BurstDetailGridView: View {
                 }
             }
         }
+        // ── Detail view sheet ────────────────────────────────────────────
+        // Passes the full filtered list so the user can swipe through all
+        // photos in this stack. On dismiss, scroll to the last-viewed photo.
         .sheet(item: $selectedFile) { file in
-            RAWFileDetailView(fileID: file.id, manager: manager)
+            let ids = filteredFiles.map { $0.id }
+            let idx = ids.firstIndex(of: file.id) ?? 0
+            RAWFileDetailView(
+                fileIDs:    ids,
+                startIndex: idx,
+                manager:    manager,
+                onDismiss: { lastViewedID in
+                    // Build the scroll ID to match the .id() modifier on the card.
+                    // We need the live file to get its current focusStatus / pickStatus.
+                    if let liveFile = manager.rawFiles.first(where: { $0.id == lastViewedID }) {
+                        scrollToID = "\(liveFile.id)-\(liveFile.focusStatus.rawValue)-\(liveFile.pickStatus.rawValue)"
+                    }
+                }
+            )
         }
     }
 

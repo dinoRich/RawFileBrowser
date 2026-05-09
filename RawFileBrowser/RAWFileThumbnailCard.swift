@@ -4,6 +4,15 @@ import ImageIO
 struct RAWFileThumbnailCard: View {
     let file: RAWFile
     @ObservedObject var manager: SDCardManager
+
+    // ── Selection mode support ──────────────────────────────────────────
+    // These are passed in from RAWFileGridView when selection mode is active.
+    // Default values (false / constant binding) mean the card behaves exactly
+    // as before when not in selection mode.
+    var isSelectMode: Bool = false
+    var isSelected: Bool = false
+    var onToggleSelect: (() -> Void)? = nil
+
     @State private var thumbnail: UIImage?
     @State private var isLoading = true
     @State private var showLabelSheet = false
@@ -43,6 +52,13 @@ struct RAWFileThumbnailCard: View {
                     }
                     .frame(width: geo.size.width, height: imgHeight)
                     .clipShape(RoundedRectangle(cornerRadius: 10))
+                    // Blue border when selected
+                    .overlay {
+                        if isSelected {
+                            RoundedRectangle(cornerRadius: 10)
+                                .strokeBorder(Color.accentColor, lineWidth: 3)
+                        }
+                    }
 
                     // ── Top-right: star rating badge ─────────────────────
                     if live.starRating > 0 {
@@ -77,14 +93,20 @@ struct RAWFileThumbnailCard: View {
                             .frame(maxWidth: .infinity, alignment: .trailing)
                             .padding(6)
                     }
+                }  // end ZStack(alignment: .bottomLeading)
+                // Dim when in selection mode but not selected
+                .opacity(isSelectMode && !isSelected ? 0.55 : 1.0)
+            }      // end GeometryReader
+            .aspectRatio(4/3, contentMode: .fit)
+            // Long-press opens the single-file label sheet, but only when NOT in
+            // selection mode. In selection mode, RAWFileGridView owns the long-press.
+            // We attach NO gesture in select mode so the parent gesture can fire.
+            .if(!isSelectMode) { view in
+                view.onLongPressGesture {
+                    showLabelSheet = true
                 }
             }
-            .aspectRatio(4/3, contentMode: .fit)
-            // Long-press opens edit sheet directly
-            .onLongPressGesture {
-                showLabelSheet = true
-            }
-            // Edit sheet
+            // Edit sheet (single-file, used outside selection mode)
             .sheet(isPresented: $showLabelSheet) {
                 LabelPickerSheet(file: file, manager: manager)
                     .presentationDetents([.height(220)])
@@ -380,5 +402,180 @@ struct FocusBadge: View {
             .background(Circle().fill(.regularMaterial).padding(-3))
             .shadow(radius: 2)
             .help("\(status.rawValue) · \(region.rawValue)")
+    }
+}
+
+// MARK: - Multi-selection label picker sheet
+//
+// Shown when the user long-presses any card while selection mode is active.
+// Every change is applied to ALL selected files at once.
+
+struct MultiSelectionLabelPickerSheet: View {
+    /// All files currently selected (resolved to live copies inside the sheet).
+    let selectedFiles: [RAWFile]
+    @ObservedObject var manager: SDCardManager
+    @Environment(\.dismiss) private var dismiss
+
+    // Local pick-state so tapping flags never dismisses the sheet.
+    // We show "mixed" state visually when the selection isn't uniform.
+    @State private var localPick: PickStatus? = nil  // nil = mixed
+
+    init(selectedFiles: [RAWFile], manager: SDCardManager) {
+        self.selectedFiles = selectedFiles
+        self.manager = manager
+        // Determine initial local pick state from the selection
+        let statuses = Set(selectedFiles.map { $0.pickStatus })
+        _localPick = State(initialValue: statuses.count == 1 ? statuses.first : nil)
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+
+            // ── Header ───────────────────────────────────────────────────
+            Text("Apply to \(selectedFiles.count) selected item\(selectedFiles.count == 1 ? "" : "s")")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .padding(.top, 20)
+                .padding(.bottom, 16)
+
+            Divider()
+
+            VStack(spacing: 24) {
+
+                // ── Pick flags ───────────────────────────────────────────
+                HStack(spacing: 32) {
+                    Spacer()
+
+                    // Accept flag
+                    Button {
+                        let next: PickStatus = localPick == .accepted ? .unpicked : .accepted
+                        localPick = next
+                        manager.setPickStatus(next, forFiles: allLiveFiles)
+                    } label: {
+                        ZStack {
+                            Image(systemName: "flag.fill")
+                                .font(.system(size: 34, weight: .bold))
+                                .foregroundStyle(Color.black)
+                            Image(systemName: "flag.fill")
+                                .font(.system(size: 28, weight: .bold))
+                                .foregroundStyle(Color.white)
+                        }
+                        .opacity(localPick == .accepted ? 1.0 : 0.25)
+                    }
+                    .buttonStyle(.plain)
+
+                    // Reject flag
+                    Button {
+                        let next: PickStatus = localPick == .rejected ? .unpicked : .rejected
+                        localPick = next
+                        manager.setPickStatus(next, forFiles: allLiveFiles)
+                    } label: {
+                        ZStack {
+                            Image(systemName: "flag.fill")
+                                .font(.system(size: 34, weight: .bold))
+                                .foregroundStyle(Color.white)
+                            Image(systemName: "flag.fill")
+                                .font(.system(size: 28, weight: .bold))
+                                .foregroundStyle(Color.black)
+                        }
+                        .opacity(localPick == .rejected ? 1.0 : 0.25)
+                    }
+                    .buttonStyle(.plain)
+
+                    Spacer()
+                }
+
+                // ── Stars ────────────────────────────────────────────────
+                // We read the first selected file's star rating as a visual
+                // reference, but setting any star applies to all selected files.
+                let refRating = allLiveFiles.first?.starRating ?? 0
+
+                HStack(spacing: 12) {
+                    Spacer()
+                    ForEach(1...5, id: \.self) { n in
+                        Button {
+                            let newRating = refRating == n ? 0 : n
+                            manager.setStarRating(newRating, forFiles: allLiveFiles)
+                        } label: {
+                            Image(systemName: n <= refRating ? "star.fill" : "star")
+                                .font(.system(size: 32))
+                                .foregroundStyle(n <= refRating ? Color.yellow : Color(.tertiaryLabel))
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    Spacer()
+                }
+
+                // ── Colour swatches ──────────────────────────────────────
+                let refColour = allLiveFiles.first?.labelColour ?? .none
+
+                HStack(spacing: 14) {
+                    Spacer()
+
+                    // "None" swatch
+                    Button {
+                        manager.setLabelColour(.none, forFiles: allLiveFiles)
+                    } label: {
+                        ZStack {
+                            Circle()
+                                .strokeBorder(Color(.tertiaryLabel), lineWidth: 1.5)
+                                .frame(width: 36, height: 36)
+                            Image(systemName: "line.diagonal")
+                                .font(.system(size: 15, weight: .light))
+                                .foregroundStyle(Color(.tertiaryLabel))
+                                .rotationEffect(.degrees(90))
+                        }
+                        .overlay {
+                            if refColour == .none {
+                                Circle().strokeBorder(Color.primary, lineWidth: 2.5)
+                            }
+                        }
+                    }
+                    .buttonStyle(.plain)
+
+                    ForEach(LabelColour.allCases.filter { $0 != .none }, id: \.self) { colour in
+                        Button {
+                            manager.setLabelColour(colour, forFiles: allLiveFiles)
+                        } label: {
+                            Circle()
+                                .fill(colour.swiftUIColor ?? .clear)
+                                .frame(width: 36, height: 36)
+                                .overlay {
+                                    if refColour == colour {
+                                        Circle().strokeBorder(Color.primary, lineWidth: 2.5)
+                                    }
+                                }
+                        }
+                        .buttonStyle(.plain)
+                    }
+
+                    Spacer()
+                }
+            }
+            .padding(.horizontal, 24)
+            .padding(.vertical, 20)
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    // Resolve snapshot IDs to live copies so ratings display correctly after changes.
+    private var allLiveFiles: [RAWFile] {
+        let ids = Set(selectedFiles.map { $0.id })
+        return manager.rawFiles.filter { ids.contains($0.id) }
+    }
+}
+
+// MARK: - Conditional modifier helper
+// Lets us write .if(condition) { view in view.someModifier() }
+// Used to attach long-press only when not in selection mode.
+
+extension View {
+    @ViewBuilder
+    func `if`<Content: View>(_ condition: Bool, transform: (Self) -> Content) -> some View {
+        if condition {
+            transform(self)
+        } else {
+            self
+        }
     }
 }
