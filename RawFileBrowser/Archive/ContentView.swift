@@ -3,6 +3,7 @@ import SwiftUI
 struct ContentView: View {
     @StateObject private var sdCardManager = SDCardManager()
     @EnvironmentObject var settings: AppSettings
+
     @State private var showSettings = false
 
     var body: some View {
@@ -17,28 +18,29 @@ struct ContentView: View {
             .navigationTitle("RAW Browser")
             .navigationBarTitleDisplayMode(.large)
             .toolbar {
+                // Settings gear — leading side
                 ToolbarItem(placement: .navigationBarLeading) {
-                    Button { showSettings = true } label: {
+                    Button {
+                        showSettings = true
+                    } label: {
                         Image(systemName: "gearshape")
                     }
                 }
+                // Refresh — trailing side (unchanged)
                 ToolbarItem(placement: .navigationBarTrailing) {
-                    Button { sdCardManager.forceRefresh() } label: {
+                    Button {
+                        sdCardManager.forceRefresh()
+                    } label: {
                         Image(systemName: "arrow.clockwise")
                     }
                 }
             }
+            // Settings sheet
             .sheet(isPresented: $showSettings) {
                 SettingsView()
                     .environmentObject(settings)
             }
         }
-        .onAppear {
-            // Wire the live settings object into the manager once at startup.
-            // From this point on, the manager always reads current values directly
-            // from settings whenever analysis runs — no need to pass it as an argument.
-            sdCardManager.settings = settings
-            sdCardManager.refresh()
-        }
+        .onAppear { sdCardManager.refresh() }
     }
 }

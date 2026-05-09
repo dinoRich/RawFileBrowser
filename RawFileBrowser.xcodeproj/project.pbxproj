@@ -12,6 +12,8 @@
 		B069DD902FA8A77B0095005E /* FocusDiagnosticView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B069DD8F2FA8A77B0095005E /* FocusDiagnosticView.swift */; };
 		B069DD932FADBC220095005E /* BurstDetailGridView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B069DD912FADBC220095005E /* BurstDetailGridView.swift */; };
 		B069DD942FADBC220095005E /* BurstStackCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = B069DD922FADBC220095005E /* BurstStackCard.swift */; };
+		B069DD972FAE88050095005E /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B069DD962FAE88050095005E /* SettingsView.swift */; };
+		B069DD982FAE88050095005E /* AppSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = B069DD952FAE88050095005E /* AppSettings.swift */; };
 		BB09B4A0ECBFB4 /* AnalysisRegionOverlay.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA09B4A0ECBFB4 /* AnalysisRegionOverlay.swift */; };
 		BB1BBD9BF8B221 /* SDCardPromptView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA1BBD9BF8B221 /* SDCardPromptView.swift */; };
 		BB1E5FE5967486 /* CanonMakernoteParser.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA1E5FE5967486 /* CanonMakernoteParser.swift */; };
@@ -47,6 +49,8 @@
 		B069DD8F2FA8A77B0095005E /* FocusDiagnosticView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FocusDiagnosticView.swift; sourceTree = "<group>"; };
 		B069DD912FADBC220095005E /* BurstDetailGridView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BurstDetailGridView.swift; sourceTree = "<group>"; };
 		B069DD922FADBC220095005E /* BurstStackCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BurstStackCard.swift; sourceTree = "<group>"; };
+		B069DD952FAE88050095005E /* AppSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppSettings.swift; sourceTree = "<group>"; };
+		B069DD962FAE88050095005E /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		DD000001 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		DD000002 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		EE000001 /* RawFileBrowser.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = RawFileBrowser.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -74,11 +78,13 @@
 		FF000011 /* RawFileBrowser */ = {
 			isa = PBXGroup;
 			children = (
-				B069DD912FADBC220095005E /* BurstDetailGridView.swift */,
-				B069DD922FADBC220095005E /* BurstStackCard.swift */,
+				B069DD952FAE88050095005E /* AppSettings.swift */,
+				B069DD962FAE88050095005E /* SettingsView.swift */,
 				DD000001 /* Assets.xcassets */,
 				DD000002 /* Info.plist */,
 				AA09B4A0ECBFB4 /* AnalysisRegionOverlay.swift */,
+				B069DD912FADBC220095005E /* BurstDetailGridView.swift */,
+				B069DD922FADBC220095005E /* BurstStackCard.swift */,
 				AA1E5FE5967486 /* CanonMakernoteParser.swift */,
 				AA63D73C64251D /* ContentView.swift */,
 				AA6CBBAE1EB7B0 /* DocumentPickerHelper.swift */,
@@ -190,6 +196,8 @@
 				BB6472334FC2A6 /* RAWFileThumbnailCard.swift in Sources */,
 				BB2450D44CBB18 /* RAWImageLoader.swift in Sources */,
 				BBEC80F9FA071D /* SDCardManager.swift in Sources */,
+				B069DD972FAE88050095005E /* SettingsView.swift in Sources */,
+				B069DD982FAE88050095005E /* AppSettings.swift in Sources */,
 				BB1BBD9BF8B221 /* SDCardPromptView.swift in Sources */,
 				BB36639D4BC5F4 /* XMPSidecarWriter.swift in Sources */,
 				BB24FE095785F8 /* YOLODetector.swift in Sources */,

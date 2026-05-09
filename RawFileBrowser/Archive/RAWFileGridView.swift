@@ -9,6 +9,13 @@ struct RAWFileGridView: View {
     @State private var showAnalysisConfirm = false
     @State private var xmpResultMessage: String? = nil
 
+    /// When non-nil, the stack detail view is shown instead of the top-level grid.
+    @State private var activeStack: BurstStack? = nil
+
+    /// The ID to scroll to when returning from a stack. Set just before
+    /// activeStack is cleared, then consumed by the ScrollViewReader.
+    @State private var scrollToID: UUID? = nil
+
     enum SortOrder: String, CaseIterable {
         case name = "Name"; case date = "Date"; case size = "Size"
         case sharpness = "Sharpness"
@@ -16,64 +23,176 @@ struct RAWFileGridView: View {
 
     enum FilterMode: String, CaseIterable {
         case all        = "All"
+        case bursts     = "Bursts"
         case accepted   = "Accepted"
         case rejected   = "Rejected"
         case sharp      = "Sharp"
         case unanalyzed = "Unanalyzed"
     }
 
-    private var filteredFiles: [RAWFile] {
-        var files = manager.rawFiles
+    // MARK: - Pill counts
 
-        // Search
-        if !searchText.isEmpty {
-            files = files.filter { $0.name.localizedCaseInsensitiveContains(searchText) }
+    private var burstPhotoCount: Int {
+        manager.gridItems.reduce(0) { total, item in
+            if case .stack(let s) = item { return total + s.count }
+            return total
         }
+    }
 
-        // Filter
-        switch filterMode {
-        case .all:        break
-        case .accepted:   files = files.filter { $0.pickStatus == .accepted }
-        case .rejected:   files = files.filter { $0.pickStatus == .rejected }
-        case .sharp:      files = files.filter { $0.focusStatus == .sharp }
-        case .unanalyzed: files = files.filter { $0.focusStatus == .unanalyzed }
+    private func pillCount(for mode: FilterMode) -> Int {
+        switch mode {
+        case .all:        return manager.rawFiles.count
+        case .bursts:     return burstPhotoCount
+        case .accepted:   return manager.rawFiles.filter { $0.pickStatus == .accepted }.count
+        case .rejected:   return manager.rawFiles.filter { $0.pickStatus == .rejected }.count
+        case .sharp:      return manager.rawFiles.filter { $0.focusStatus == .sharp }.count
+        case .unanalyzed: return manager.rawFiles.filter { $0.focusStatus == .unanalyzed }.count
         }
+    }
 
-        // Sort
-        return files.sorted {
-            switch sortOrder {
-            case .name:      return $0.name < $1.name
-            case .date:
-                let d0 = $0.modificationDate ?? .distantPast
-                let d1 = $1.modificationDate ?? .distantPast
-                return d0 > d1
-            case .size:      return $0.size > $1.size
-            case .sharpness: return $0.focusScore > $1.focusScore
+    private var visibleFilterModes: [FilterMode] {
+        FilterMode.allCases.filter { mode in
+            switch mode {
+            case .all:    return true
+            case .bursts: return burstPhotoCount > 0
+            default:      return pillCount(for: mode) > 0
             }
         }
     }
 
-    // Fixed 2 columns on iPhone, 3 on iPad — prevents cards growing too wide
-    private var columns: [GridItem] {
-        let isIPad = UIDevice.current.userInterfaceIdiom == .pad
-        let count  = isIPad ? 3 : 2
-        return Array(repeating: GridItem(.flexible(), spacing: 12), count: count)
+    // MARK: - Top-level grid items
+
+    private var filteredGridItems: [GridItem] {
+        let items: [GridItem]
+
+        if filterMode == .all && searchText.isEmpty {
+            items = manager.gridItems
+
+        } else if filterMode == .bursts && searchText.isEmpty {
+            items = manager.gridItems.filter {
+                if case .stack = $0 { return true }
+                return false
+            }
+
+        } else {
+            items = manager.gridItems.compactMap { item -> GridItem? in
+                switch item {
+                case .single(let file):
+                    if filterMode == .bursts { return nil }
+                    guard matchesFilter(file) && matchesSearch(file) else { return nil }
+                    return .single(file)
+
+                case .stack(let stack):
+                    if filterMode == .bursts {
+                        if searchText.isEmpty { return item }
+                        let matching = stack.files.filter { matchesSearch($0) }
+                        if matching.isEmpty { return nil }
+                        if matching.count == 1 { return .single(matching[0]) }
+                        return .stack(BurstStack(files: matching))
+                    } else {
+                        let matching = stack.files.filter { matchesFilter($0) && matchesSearch($0) }
+                        if matching.isEmpty { return nil }
+                        if matching.count == 1 { return .single(matching[0]) }
+                        return .stack(BurstStack(files: matching))
+                    }
+                }
+            }
+        }
+
+        return items.sorted {
+            let lhs = leadingFile($0)
+            let rhs = leadingFile($1)
+            switch sortOrder {
+            case .name:
+                return lhs.name < rhs.name
+            case .date:
+                let d0 = lhs.modificationDate ?? .distantPast
+                let d1 = rhs.modificationDate ?? .distantPast
+                return d0 > d1
+            case .size:
+                return lhs.size > rhs.size
+            case .sharpness:
+                return lhs.focusScore > rhs.focusScore
+            }
+        }
     }
 
+    private func matchesFilter(_ file: RAWFile) -> Bool {
+        switch filterMode {
+        case .all, .bursts: return true
+        case .accepted:     return file.pickStatus == .accepted
+        case .rejected:     return file.pickStatus == .rejected
+        case .sharp:        return file.focusStatus == .sharp
+        case .unanalyzed:   return file.focusStatus == .unanalyzed
+        }
+    }
+
+    private func matchesSearch(_ file: RAWFile) -> Bool {
+        searchText.isEmpty || file.name.localizedCaseInsensitiveContains(searchText)
+    }
+
+    private func leadingFile(_ item: GridItem) -> RAWFile {
+        switch item {
+        case .single(let f): return f
+        case .stack(let s):  return s.coverFile
+        }
+    }
+
+    private var columns: [SwiftUI.GridItem] {
+        let isIPad = UIDevice.current.userInterfaceIdiom == .pad
+        let count  = isIPad ? 3 : 2
+        return Array(repeating: SwiftUI.GridItem(.flexible(), spacing: 12), count: count)
+    }
+
+    // MARK: - Body
+    //
+    // Both the top-level grid and the stack detail view stay in the view
+    // hierarchy at all times. Visibility is toggled with opacity and
+    // allowsHitTesting rather than swapping views in/out.
+    //
+    // This is the key fix for scroll position restoration: LazyVGrid is
+    // never torn down, so its items always exist when scrollTo is called.
+
     var body: some View {
+        ZStack {
+            // ── Top-level grid (always in hierarchy) ──────────────────
+            topLevelGrid
+                .opacity(activeStack == nil ? 1 : 0)
+                .allowsHitTesting(activeStack == nil)
+
+            // ── Stack detail view (only constructed when needed) ──────
+            if let stack = activeStack {
+                BurstDetailGridView(
+                    stack: stack,
+                    manager: manager,
+                    activeStack: $activeStack,
+                    onDismiss: {
+                        scrollToID = stack.id
+                    }
+                )
+                .transition(.identity)  // no animation — instant swap
+            }
+        }
+    }
+
+    // MARK: - Top-level grid
+
+    private var topLevelGrid: some View {
         VStack(spacing: 0) {
-            // Analysis banner
             if manager.isAnalyzing {
                 analysisBanner
             } else if manager.rawFiles.contains(where: { $0.focusStatus != .unanalyzed }) {
                 analysisSummaryBar
             }
 
-            // Filter pills
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 8) {
-                    ForEach(FilterMode.allCases, id: \.self) { mode in
-                        FilterPill(mode: mode, isSelected: filterMode == mode) {
+                    ForEach(visibleFilterModes, id: \.self) { mode in
+                        FilterPill(
+                            mode: mode,
+                            count: pillCount(for: mode),
+                            isSelected: filterMode == mode
+                        ) {
                             filterMode = mode
                         }
                     }
@@ -84,21 +203,30 @@ struct RAWFileGridView: View {
 
             Divider()
 
-            // Grid
-            if filteredFiles.isEmpty {
+            if filteredGridItems.isEmpty {
                 emptyState
             } else {
-                ScrollView {
-                    LazyVGrid(columns: columns, spacing: 12) {
-                        ForEach(filteredFiles) { file in
-                            RAWFileThumbnailCard(file: file, manager: manager)
-                                .onTapGesture { selectedFile = file }
-                                .id("\(file.id)-\(file.focusStatus.rawValue)-\(file.pickStatus.rawValue)")
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        LazyVGrid(columns: columns, spacing: 12) {
+                            ForEach(filteredGridItems) { item in
+                                gridCell(for: item)
+                            }
                         }
+                        .padding()
                     }
-                    .padding()
+                    .background(Color(.systemGray6))
+                    // Fires when scrollToID is set after returning from a stack.
+                    // Because LazyVGrid is never torn down, its items already
+                    // exist and scrollTo finds them immediately.
+                    .onChange(of: scrollToID) { targetID in
+                        guard let id = targetID else { return }
+                        withAnimation {
+                            proxy.scrollTo(id, anchor: .center)
+                        }
+                        scrollToID = nil
+                    }
                 }
-                .background(Color(.systemGray6))
             }
         }
         .searchable(text: $searchText, prompt: "Search files")
@@ -107,7 +235,6 @@ struct RAWFileGridView: View {
                 BrowseSDCardButton(manager: manager).labelStyle(.iconOnly)
             }
             ToolbarItemGroup(placement: .navigationBarTrailing) {
-                // Analyze button
                 if !manager.isAnalyzing {
                     Button {
                         showAnalysisConfirm = true
@@ -116,7 +243,6 @@ struct RAWFileGridView: View {
                     }
                 }
 
-                // Write XMP button — only shown when at least one file has a species
                 let writeable = manager.rawFiles.filter { $0.detectedAnimalLabel != nil }
                 if !writeable.isEmpty {
                     Button {
@@ -138,7 +264,6 @@ struct RAWFileGridView: View {
                 }
             }
         }
-        // .navigationSubtitle removed — iOS 26+ only
         .sheet(item: $selectedFile) { file in
             RAWFileDetailView(fileID: file.id, manager: manager)
         }
@@ -161,6 +286,23 @@ struct RAWFileGridView: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("This may take a moment depending on file count.")
+        }
+    }
+
+    // MARK: - Grid cell builder
+
+    @ViewBuilder
+    private func gridCell(for item: GridItem) -> some View {
+        switch item {
+        case .single(let file):
+            RAWFileThumbnailCard(file: file, manager: manager)
+                .onTapGesture { selectedFile = file }
+                .id("\(file.id)-\(file.focusStatus.rawValue)-\(file.pickStatus.rawValue)")
+
+        case .stack(let stack):
+            BurstStackCard(stack: stack, manager: manager, visibleCount: stack.files.count)
+                .onTapGesture { activeStack = stack }
+                .id(stack.id)
         }
     }
 
@@ -213,14 +355,17 @@ struct RAWFileGridView: View {
             Image(systemName: filterMode == .rejected ? "flag.fill" : "photo.on.rectangle.angled")
                 .font(.system(size: 60))
                 .foregroundStyle(.secondary)
-            Text(filterMode == .rejected ? "No rejected files"
+            Text(filterMode == .rejected   ? "No rejected files"
                  : filterMode == .accepted ? "No accepted files"
+                 : filterMode == .bursts   ? "No bursts found"
                  : "No files match")
                 .font(.title2.weight(.semibold))
             Text(filterMode == .rejected
                  ? "No photos have been rejected yet."
                  : filterMode == .accepted
                  ? "No photos have been accepted yet."
+                 : filterMode == .bursts
+                 ? "No burst sequences were detected in this folder."
                  : "Try adjusting your search or filter.")
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -228,26 +373,19 @@ struct RAWFileGridView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding()
     }
-
-    private var subtitleText: String {
-        let total = filteredFiles.count
-        if manager.rejectedCount > 0 {
-            return "\(total) files · \(manager.rejectedCount) rejected"
-        }
-        return "\(total) files"
-    }
 }
 
 // MARK: - Filter pill
 
 struct FilterPill: View {
     let mode: RAWFileGridView.FilterMode
+    let count: Int
     let isSelected: Bool
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
-            Text(mode.rawValue)
+            Text("\(mode.rawValue) \(count)")
                 .font(.subheadline.weight(isSelected ? .semibold : .regular))
                 .padding(.horizontal, 12)
                 .padding(.vertical, 6)

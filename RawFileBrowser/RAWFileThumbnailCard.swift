@@ -94,11 +94,20 @@ struct RAWFileThumbnailCard: View {
 
             // ── Filename / metadata row ──────────────────────────────────
             VStack(alignment: .leading, spacing: 2) {
-                Text(live.name)
-                    .font(.caption.weight(.medium))
-                    .lineLimit(2)
-                    .truncationMode(.middle)
-                    .foregroundStyle(live.pickStatus == .rejected ? .secondary : .primary)
+                // ZStack forces exactly 2-line height at all times.
+                // The invisible placeholder always occupies 2 lines so
+                // short filenames don't collapse the row and throw off
+                // grid alignment.
+                ZStack(alignment: .topLeading) {
+                    Text("A\nA")
+                        .font(.caption.weight(.medium))
+                        .opacity(0)
+                    Text(live.url.deletingPathExtension().lastPathComponent)
+                        .font(.caption.weight(.medium))
+                        .lineLimit(2)
+                        .truncationMode(.middle)
+                        .foregroundStyle(live.pickStatus == .rejected ? .secondary : .primary)
+                }
 
                 HStack {
                     Text(live.fileExtension)

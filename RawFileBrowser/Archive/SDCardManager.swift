@@ -22,7 +22,6 @@ enum LabelColour: String, Codable, CaseIterable {
     case green
     case blue
     case purple
-
 }
 
 // MARK: - RAWFile model
@@ -30,15 +29,25 @@ enum LabelColour: String, Codable, CaseIterable {
 struct RAWFile: Identifiable {
     let id = UUID()
     let url: URL
-    var name: String { url.lastPathComponent }
-    var size: Int64 {
-        (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize.map(Int64.init) ?? 0) ?? 0
-    }
+
+    // Stored once at init — never re-read from disk.
+    // modificationDate is accessed O(N log N) times during burst grouping sort,
+    // so a computed property hitting the filesystem each time is expensive.
+    let name: String
+    let fileExtension: String
+    let modificationDate: Date?
+    let size: Int64
+
     var formattedSize: String { ByteCountFormatter.string(fromByteCount: size, countStyle: .file) }
-    var modificationDate: Date? {
-        try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate
+
+    init(url: URL) {
+        self.url              = url
+        self.name             = url.lastPathComponent
+        self.fileExtension    = url.pathExtension.uppercased()
+        let rv                = try? url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
+        self.modificationDate = rv?.contentModificationDate
+        self.size             = Int64(rv?.fileSize ?? 0)
     }
-    var fileExtension: String { url.pathExtension.uppercased() }
 
     var focusStatus: FocusStatus = .unanalyzed
     var focusScore: Double = 0
@@ -49,55 +58,61 @@ struct RAWFile: Identifiable {
     var analysisRect: CGRect? = nil
     var subjectContour: [[CGPoint]] = []
     var detectionConfidence: Float? = nil
-    /// Whether the camera AF point overlapped the detected subject.
-    /// nil = no AF point or no subject (not applicable).
-    /// false = AF point was on the background → missed focus.
     var afOverlapsSubject: Bool? = nil
-    /// Whether the AF point specifically overlapped the detected eye region.
-    /// nil = no AF point, or no eye detected.
-    /// true = AF was on the eye. false = eye found but AF missed it.
     var afOnEye: Bool? = nil
-    /// True when analysis found the AF point was NOT on the detected subject.
-    /// The sharpness status is determined from the subject body regardless.
     var afNotOnSubject: Bool = false
-    // Diagnostic fields — raw values before thresholds are applied
-    /// Laplacian variance score BEFORE the size-confidence penalty is applied (0-1 normalised)
     var rawSharpnessScore: Double = 0
-    /// Fraction of image area occupied by the subject body rect (0-1)
     var subjectBodyArea: Double = 0
-    /// Fraction of image area occupied by the scoring rect (eyes/head/AF point) (0-1)
     var scoringRectArea: Double = 0
-    /// Whether a camera AF point was found in the file
     var hadAFPoint: Bool = false
     var sharpThreshold: Double = 0
     var acceptableThreshold: Double = 0
-    /// Raw Laplacian score at the AF point rect (Case 5 only — nil otherwise)
     var afPointRawScore: Double? = nil
-    /// Raw Laplacian score at the subject body rect (Case 5 only — nil otherwise)
     var subjectBodyRawScore: Double? = nil
-    /// Which region drove the final rating
     var ratingBasis: FocusResult.RatingBasis = .fullImage
     var xmpWritten: Bool = false
 
     // MARK: Pick status
-    /// The current accept/reject decision for this photo.
     var pickStatus: PickStatus = .unpicked
-    /// True once the user has manually overridden the auto-set pick status.
     var pickIsOverridden: Bool = false
 
     // MARK: Star rating & colour label
-    /// Star rating set by the user. 0 = unrated (not shown on thumbnail).
     var starRating: Int = 0
-    /// Colour label shown as the thumbnail outline. .none = no colour.
     var labelColour: LabelColour = .none
 
-    /// Convenience: true when the photo should be visually treated as rejected.
     var isRejected: Bool { pickStatus == .rejected }
 }
 
 extension RAWFile: Hashable, Equatable {
     static func == (lhs: RAWFile, rhs: RAWFile) -> Bool { lhs.id == rhs.id }
     func hash(into hasher: inout Hasher) { hasher.combine(id) }
+}
+
+// MARK: - Burst stack
+
+/// A group of RAWFile objects detected as a continuous burst sequence.
+/// `coverFile` is the first photo in the burst and is used as the stack thumbnail.
+struct BurstStack: Identifiable {
+    let id = UUID()
+    var files: [RAWFile]
+
+    var coverFile: RAWFile { files[0] }
+    var count: Int { files.count }
+}
+
+// MARK: - Grid item
+
+/// Represents one item in the top-level grid — either a single photo or a burst stack.
+enum GridItem: Identifiable {
+    case single(RAWFile)
+    case stack(BurstStack)
+
+    var id: UUID {
+        switch self {
+        case .single(let f): return f.id
+        case .stack(let s):  return s.id
+        }
+    }
 }
 
 // MARK: - Supported RAW extensions
@@ -108,11 +123,21 @@ private let rawExtensions: Set<String> = [
     "mrw", "x3f", "erf", "kdc", "dcr", "mef", "mos", "ptx"
 ]
 
+/// Two photos are considered part of the same burst if their timestamps
+/// are within this many seconds of each other.
+private let burstGapThreshold: TimeInterval = 2.0
+
 // MARK: - SDCardManager
 
 @MainActor
 final class SDCardManager: ObservableObject {
     @Published var rawFiles: [RAWFile] = []
+
+    /// The grouped representation used by the top-level grid.
+    /// Solo photos appear as `.single`, burst groups as `.stack`.
+    /// Rebuilt automatically whenever `rawFiles` is set.
+    @Published var gridItems: [GridItem] = []
+
     @Published var isSDCardMounted: Bool = false
     @Published var isLoading: Bool = false
     @Published var isAnalyzing: Bool = false
@@ -120,10 +145,8 @@ final class SDCardManager: ObservableObject {
     @Published var errorMessage: String?
 
     /// Holds the security-scoped directory URL open for the lifetime of the session.
-    /// MUST remain started until the user picks a new directory or the app quits.
     private var activeDirectoryURL: URL? {
         didSet {
-            // Stop access on the previous directory when a new one is picked
             oldValue?.stopAccessingSecurityScopedResource()
         }
     }
@@ -142,39 +165,41 @@ final class SDCardManager: ObservableObject {
         Task {
             let found = scanForRAWFiles()
             rawFiles = found
+            gridItems = groupIntoBursts(found)
             if !found.isEmpty { isSDCardMounted = true }
             isLoading = false
         }
     }
 
     func forceRefresh() {
-        activeDirectoryURL = nil   // stops security-scoped access on old dir
+        activeDirectoryURL = nil
         isSDCardMounted = false
         rawFiles = []
+        gridItems = []
         isLoading = true
         errorMessage = nil
 
         Task {
             let found = scanForRAWFiles()
             rawFiles = found
+            gridItems = groupIntoBursts(found)
             isSDCardMounted = !found.isEmpty || detectExternalVolumes()
             isLoading = false
         }
     }
 
     /// Called by the document picker after the user selects a folder.
-    /// Security-scoped access has already been started by the coordinator —
-    /// we store the URL to keep it open for as long as we need to read files.
     func loadFilesFromDirectory(_ url: URL) {
-        // Store BEFORE enumeration — keeps access open for thumbnails and image loads
         activeDirectoryURL = url
         isLoading = true
         errorMessage = nil
 
         let found = collectRAWFiles(in: url)
+        let sorted = found.sorted { $0.name < $1.name }
 
         isSDCardMounted = true
-        rawFiles = found.sorted { $0.name < $1.name }
+        rawFiles = sorted
+        gridItems = groupIntoBursts(sorted)
         isLoading = false
 
         if found.isEmpty {
@@ -225,7 +250,6 @@ final class SDCardManager: ObservableObject {
                     rawFiles[i].afPointRawScore       = result.afPointRawScore
                     rawFiles[i].subjectBodyRawScore   = result.subjectBodyRawScore
                     rawFiles[i].ratingBasis           = result.ratingBasis
-                    // Auto-set pick status from quality, unless the user has already overridden it
                     if !rawFiles[i].pickIsOverridden {
                         rawFiles[i].pickStatus = result.status.isRejected ? .rejected : .accepted
                     }
@@ -236,6 +260,9 @@ final class SDCardManager: ObservableObject {
         }
 
         isAnalyzing = false
+
+        // Rebuild gridItems so stack cover photos reflect updated analysis state
+        gridItems = groupIntoBursts(rawFiles)
     }
 
     func analyzeFocus(for file: RAWFile) async {
@@ -265,27 +292,58 @@ final class SDCardManager: ObservableObject {
         if !rawFiles[idx].pickIsOverridden {
             rawFiles[idx].pickStatus = result.status.isRejected ? .rejected : .accepted
         }
+        gridItems = groupIntoBursts(rawFiles)
     }
 
     var rejectedCount: Int { rawFiles.filter { $0.pickStatus == .rejected }.count }
 
-    /// Set the pick status for a file. Marks the override flag so re-analysis won't reset it.
+    // MARK: - Pick / rating / label setters
+
     func setPickStatus(_ status: PickStatus, for file: RAWFile) {
         guard let idx = rawFiles.firstIndex(where: { $0.id == file.id }) else { return }
         rawFiles[idx].pickStatus = status
         rawFiles[idx].pickIsOverridden = (status != .unpicked)
+        gridItems = groupIntoBursts(rawFiles)
     }
 
-    /// Set the star rating (0–5) for a file.
+    /// Set the same pick status on every file in a burst stack.
+    func setPickStatus(_ status: PickStatus, forAllIn stack: BurstStack) {
+        for file in stack.files {
+            guard let idx = rawFiles.firstIndex(where: { $0.id == file.id }) else { continue }
+            rawFiles[idx].pickStatus = status
+            rawFiles[idx].pickIsOverridden = (status != .unpicked)
+        }
+        gridItems = groupIntoBursts(rawFiles)
+    }
+
     func setStarRating(_ rating: Int, for file: RAWFile) {
         guard let idx = rawFiles.firstIndex(where: { $0.id == file.id }) else { return }
         rawFiles[idx].starRating = min(max(rating, 0), 5)
+        gridItems = groupIntoBursts(rawFiles)
     }
 
-    /// Set the colour label for a file.
+    /// Set the same star rating on every file in a burst stack.
+    func setStarRating(_ rating: Int, forAllIn stack: BurstStack) {
+        for file in stack.files {
+            guard let idx = rawFiles.firstIndex(where: { $0.id == file.id }) else { continue }
+            rawFiles[idx].starRating = min(max(rating, 0), 5)
+        }
+        gridItems = groupIntoBursts(rawFiles)
+    }
+
     func setLabelColour(_ colour: LabelColour, for file: RAWFile) {
         guard let idx = rawFiles.firstIndex(where: { $0.id == file.id }) else { return }
         rawFiles[idx].labelColour = colour
+        gridItems = groupIntoBursts(rawFiles)
+    }
+
+    /// Set the same colour label on every file in a burst stack.
+    func setLabelColour(_ colour: LabelColour, forAllIn stack: BurstStack) {
+        for file in stack.files {
+            guard let idx = rawFiles.firstIndex(where: { $0.id == file.id }) else { continue }
+            rawFiles[idx].labelColour = colour
+        }
+        gridItems = groupIntoBursts(rawFiles)
     }
 
     func markXMPWritten(for file: RAWFile) {
@@ -295,7 +353,6 @@ final class SDCardManager: ObservableObject {
 
     // MARK: - XMP sidecar writing
 
-    /// Writes an XMP sidecar for a single file. Called on user request only.
     func writeXMP(for file: RAWFile) {
         guard let idx = rawFiles.firstIndex(where: { $0.id == file.id }) else { return }
         do {
@@ -306,13 +363,10 @@ final class SDCardManager: ObservableObject {
         }
     }
 
-    /// Writes XMP sidecars for all analysed files that have a species label.
-    /// Returns a summary string for display.
     func writeXMPBatch() -> String {
         let eligible = rawFiles.filter { $0.detectedAnimalLabel != nil }
         let result   = XMPSidecarWriter.writeBatch(for: eligible)
 
-        // Mark written files
         for i in rawFiles.indices {
             if rawFiles[i].detectedAnimalLabel != nil && !rawFiles[i].xmpWritten {
                 rawFiles[i].xmpWritten = XMPSidecarWriter.sidecarExists(for: rawFiles[i])
@@ -323,6 +377,71 @@ final class SDCardManager: ObservableObject {
         if result.skipped > 0 { summary += ", \(result.skipped) skipped (no species)" }
         if !result.errors.isEmpty { summary += ", \(result.errors.count) error(s)" }
         return summary
+    }
+
+    // MARK: - Burst grouping
+
+    /// Groups a sorted array of RAWFiles into GridItems by comparing consecutive
+    /// modification timestamps. Files within `burstGapThreshold` seconds of the
+    /// previous file are considered part of the same burst.
+    ///
+    /// The input should already be sorted by name (which for Canon files is also
+    /// chronological order). A secondary sort by modificationDate is applied here
+    /// to ensure correctness regardless of how the files were originally sorted.
+    private func groupIntoBursts(_ files: [RAWFile]) -> [GridItem] {
+        // Sort by modification date so timestamp comparison is meaningful.
+        // Files without a date sort to the end and are treated as solo items.
+        let sorted = files.sorted {
+            let d0 = $0.modificationDate ?? .distantFuture
+            let d1 = $1.modificationDate ?? .distantFuture
+            return d0 < d1
+        }
+
+        var result: [GridItem] = []
+        var currentGroup: [RAWFile] = []
+
+        for file in sorted {
+            if currentGroup.isEmpty {
+                // Start the first group
+                currentGroup.append(file)
+            } else {
+                // modificationDate is now a stored let — safe to access repeatedly.
+                // If either date is missing, treat as a gap > threshold (no grouping).
+                let gap: TimeInterval
+                if let last = currentGroup.last!.modificationDate,
+                   let this = file.modificationDate {
+                    gap = this.timeIntervalSince(last)
+                } else {
+                    gap = burstGapThreshold + 1  // force a new group
+                }
+
+                if gap <= burstGapThreshold {
+                    // Within threshold — same burst
+                    currentGroup.append(file)
+                } else {
+                    // Gap too large — save current group and start a new one
+                    result.append(gridItem(from: currentGroup))
+                    currentGroup = [file]
+                }
+            }
+        }
+
+        // Don't forget the last group
+        if !currentGroup.isEmpty {
+            result.append(gridItem(from: currentGroup))
+        }
+
+        return result
+    }
+
+    /// Converts a group of files into the appropriate GridItem.
+    /// A group of 1 is always a solo item. A group of 2+ becomes a stack.
+    private func gridItem(from group: [RAWFile]) -> GridItem {
+        if group.count == 1 {
+            return .single(group[0])
+        } else {
+            return .stack(BurstStack(files: group))
+        }
     }
 
     // MARK: - Private helpers

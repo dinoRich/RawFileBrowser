@@ -1,10 +1,20 @@
 import SwiftUI
 
+// MARK: - BurstStackCard
+
 /// Thumbnail card shown in the grid when a grid item is a burst stack.
-/// Displays the cover photo with a stacked-cards visual effect and a count
-/// badge. Long-pressing opens BurstLabelPickerSheet, which is visually
-/// identical to LabelPickerSheet but applies every action to all photos
-/// in the stack.
+///
+/// Badge layout:
+///   Top-left:     stack count badge
+///   Top-right:    star-range badge   — matches StarRatingBadge exactly
+///   Bottom-left:  focus-range pill   — frosted Capsule with circle.dashed icons inside
+///   Bottom-right: pick-flag badge    (solid white / solid black / diagonal mix)
+///
+/// Stack visual: front card sits at top-left (0,0). Two darker shadow layers
+/// are offset 5 pt and 10 pt to the bottom-right. The front card is shrunk by
+/// 10 pt in each dimension so the entire composition fits within the same
+/// bounding box as a solo card — grid rows stay perfectly aligned.
+
 struct BurstStackCard: View {
     let stack: BurstStack
     @ObservedObject var manager: SDCardManager
@@ -14,35 +24,56 @@ struct BurstStackCard: View {
     @State private var isLoading = true
     @State private var showActionSheet = false
 
-    /// Always read the cover file live so badges stay in sync.
     private var liveCover: RAWFile? {
         manager.rawFiles.first { $0.id == stack.coverFile.id }
     }
 
+    private var liveFiles: [RAWFile] {
+        let ids = Set(stack.files.map { $0.id })
+        let live = manager.rawFiles.filter { ids.contains($0.id) }
+        return live.isEmpty ? stack.files : live
+    }
+
     var body: some View {
         let cover = liveCover ?? stack.coverFile
+        let files = liveFiles
 
         VStack(alignment: .leading, spacing: 6) {
 
             // ── Image area ──────────────────────────────────────────────
+            // Outer box: totalW × totalH — identical to RAWFileThumbnailCard.
+            //
+            // All three cards are the same size: (totalW - step*2) × (totalH - step*2).
+            // Front card:    offset (0, 0)         — top+left flush with cell edge
+            // Middle shadow: offset (step, step)   — peeks step pt at bottom+right
+            // Back shadow:   offset (step*2, step*2) — bottom-right corner lands
+            //                                          exactly at the cell boundary
+            // ZStack clipped to totalW × totalH — no overflow.
             GeometryReader { geo in
-                let imgHeight = geo.size.width * 3 / 4  // 4:3 ratio
+                let totalW = geo.size.width
+                let totalH = geo.size.width * 3 / 4
+                let step: CGFloat = 8
 
-                ZStack(alignment: .bottomLeading) {
+                let cardW = totalW - step * 2
+                let cardH = totalH - step * 2
 
-                    // Stacked-cards shadow layers drawn behind the main card
+                ZStack(alignment: .topLeading) {
+
+                    // ── Back shadow ──────────────────────────────────────
                     RoundedRectangle(cornerRadius: 10)
-                        .fill(Color(.systemGray4))
-                        .frame(width: geo.size.width - 8, height: imgHeight)
-                        .offset(x: 6, y: -6)
+                        .fill(Color(.systemGray3))
+                        .frame(width: cardW, height: cardH)
+                        .offset(x: step * 2, y: step * 2)
 
+                    // ── Middle shadow ────────────────────────────────────
                     RoundedRectangle(cornerRadius: 10)
                         .fill(Color(.systemGray5))
-                        .frame(width: geo.size.width - 4, height: imgHeight)
-                        .offset(x: 3, y: -3)
+                        .frame(width: cardW, height: cardH)
+                        .offset(x: step, y: step)
 
-                    // Main (front) card
-                    ZStack {
+                    // ── Front card — top-left flush, smaller than box ────
+                    ZStack(alignment: .bottomLeading) {
+
                         RoundedRectangle(cornerRadius: 10)
                             .fill(Color(.secondarySystemBackground))
 
@@ -50,56 +81,61 @@ struct BurstStackCard: View {
                             Image(uiImage: thumb)
                                 .resizable()
                                 .scaledToFill()
-                                .frame(width: geo.size.width, height: imgHeight)
+                                .frame(width: cardW, height: cardH)
                                 .clipped()
                         } else if isLoading {
                             ProgressView()
+                                .frame(width: cardW, height: cardH)
                         } else {
                             Image(systemName: "camera.aperture")
-                                .font(.system(size: 36))
+                                .font(.system(size: 28))
                                 .foregroundStyle(.secondary)
+                                .frame(width: cardW, height: cardH)
                         }
+
+                        // Top-left: stack count badge
+                        BurstCountBadge(count: visibleCount)
+                            .frame(width: cardW, height: cardH,
+                                   alignment: .topLeading)
+                            .padding(6)
+
+                        // Top-right: star-range badge
+                        if let starBadge = BurstStarRangeBadge(files: files) {
+                            starBadge
+                                .frame(width: cardW, height: cardH,
+                                       alignment: .topTrailing)
+                                .padding(6)
+                        }
+
+                        // Bottom-left: focus-range pill
+                        if let focusPill = BurstFocusRangePill(files: files) {
+                            focusPill
+                                .frame(width: cardW, height: cardH,
+                                       alignment: .bottomLeading)
+                                .padding(6)
+                        }
+
+                        // Bottom-right: pick-flag badge
+                        BurstPickBadge(files: files)
+                            .frame(width: cardW, height: cardH,
+                                   alignment: .bottomTrailing)
+                            .padding(6)
                     }
-                    .frame(width: geo.size.width, height: imgHeight)
+                    .frame(width: cardW, height: cardH)
                     .clipShape(RoundedRectangle(cornerRadius: 10))
                     .overlay {
                         if let outlineColor = cover.labelColour.swiftUIColor {
                             RoundedRectangle(cornerRadius: 10)
                                 .strokeBorder(outlineColor, lineWidth: 3)
-                        } else if cover.pickStatus == .accepted {
-                            RoundedRectangle(cornerRadius: 10)
-                                .strokeBorder(Color.white, lineWidth: 3)
-                        } else if cover.pickStatus == .rejected {
-                            RoundedRectangle(cornerRadius: 10)
-                                .strokeBorder(Color.black, lineWidth: 3)
                         }
                     }
-
-                    // Top-right: burst count badge
-                    BurstCountBadge(count: visibleCount)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity,
-                               alignment: .topTrailing)
-                        .padding(6)
-
-                    // Bottom-left: quality badge (cover photo)
-                    if cover.focusStatus != .unanalyzed,
-                       let badge = QualityBadgeInfo(status: cover.focusStatus) {
-                        QualityBadge(info: badge)
-                            .padding(6)
-                    }
-
-                    // Bottom-right: pick/flag badge (cover photo)
-                    if cover.pickStatus != .unpicked {
-                        PickFlagBadge(status: cover.pickStatus)
-                            .frame(maxWidth: .infinity, alignment: .trailing)
-                            .padding(6)
-                    }
+                    // No offset — front card at (0,0), top-left flush
                 }
+                .frame(width: totalW, height: totalH, alignment: .topLeading)
+                .clipped()
             }
             .aspectRatio(4/3, contentMode: .fit)
-            .onLongPressGesture {
-                showActionSheet = true
-            }
+            .onLongPressGesture { showActionSheet = true }
             .sheet(isPresented: $showActionSheet) {
                 BurstLabelPickerSheet(stack: stack, manager: manager)
                     .presentationDetents([.height(220)])
@@ -108,11 +144,16 @@ struct BurstStackCard: View {
 
             // ── Filename / metadata row ─────────────────────────────────
             VStack(alignment: .leading, spacing: 2) {
-                Text("Burst — \(stack.count) photos")
-                    .font(.caption.weight(.medium))
-                    .lineLimit(2)
-                    .truncationMode(.middle)
-                    .foregroundStyle(.primary)
+                ZStack(alignment: .topLeading) {
+                    Text("A\nA")
+                        .font(.caption.weight(.medium))
+                        .opacity(0)
+                    Text("Burst — \(stack.count) photos")
+                        .font(.caption.weight(.medium))
+                        .lineLimit(2)
+                        .truncationMode(.middle)
+                        .foregroundStyle(.primary)
+                }
 
                 HStack {
                     Text(cover.fileExtension)
@@ -148,19 +189,232 @@ struct BurstStackCard: View {
     }
 }
 
+// MARK: - BurstFocusRangePill
+
+struct BurstFocusRangePill: View {
+
+    private let bestColor:  Color
+    private let worstColor: Color
+    private let isSame:     Bool
+
+    init?(files: [RAWFile]) {
+        let analysed = files.filter { $0.focusStatus != .unanalyzed }
+        guard !analysed.isEmpty else { return nil }
+
+        func rank(_ s: FocusStatus) -> Int {
+            switch s {
+            case .sharp:        return 0
+            case .slightlyBlur: return 1
+            case .blurry:       return 2
+            default:            return 99
+            }
+        }
+        func color(_ s: FocusStatus) -> Color {
+            switch s {
+            case .sharp:        return .green
+            case .slightlyBlur: return .orange
+            case .blurry:       return .red
+            default:            return .gray
+            }
+        }
+
+        let statuses = analysed.map { $0.focusStatus }
+        let best  = statuses.min(by: { rank($0) < rank($1) })!
+        let worst = statuses.max(by: { rank($0) < rank($1) })!
+
+        bestColor  = color(best)
+        worstColor = color(worst)
+        isSame     = (best == worst)
+    }
+
+    var body: some View {
+        if isSame {
+            // Single indicator — identical to QualityBadge on solo thumbnails
+            Image(systemName: "circle.dashed")
+                .font(.system(size: 16, weight: .bold))
+                .foregroundStyle(bestColor)
+                .background(Circle().fill(.regularMaterial).padding(-3))
+                .shadow(radius: 1)
+        } else {
+            // Range indicator — capsule uses the same -3 inset as the single
+            // indicator's circle, so the background hugs the glyphs identically
+            HStack(spacing: 4) {
+                Image(systemName: "circle.dashed")
+                    .font(.system(size: 16, weight: .bold))
+                    .foregroundStyle(bestColor)
+
+                Text("–")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.primary)
+
+                Image(systemName: "circle.dashed")
+                    .font(.system(size: 16, weight: .bold))
+                    .foregroundStyle(worstColor)
+            }
+            .background(Capsule().fill(.regularMaterial).padding(-3))
+            .shadow(radius: 1)
+        }
+    }
+}
+
+// MARK: - BurstPickBadge
+
+struct BurstPickBadge: View {
+
+    enum PickState {
+        case allAccepted, allRejected, mixed, allUnpicked
+    }
+
+    private let pickState: PickState
+
+    init(files: [RAWFile]) {
+        let picked = files.filter { $0.pickStatus != .unpicked }
+        if picked.isEmpty {
+            pickState = .allUnpicked
+        } else {
+            let hasAccepted = picked.contains { $0.pickStatus == .accepted }
+            let hasRejected = picked.contains { $0.pickStatus == .rejected }
+            if hasAccepted && hasRejected {
+                pickState = .mixed
+            } else if hasAccepted {
+                pickState = .allAccepted
+            } else {
+                pickState = .allRejected
+            }
+        }
+    }
+
+    var body: some View {
+        switch pickState {
+        case .allUnpicked:
+            EmptyView()
+
+        case .allAccepted:
+            ZStack {
+                Image(systemName: "flag.fill")
+                    .font(.system(size: 17, weight: .bold))
+                    .foregroundStyle(Color.black)
+                Image(systemName: "flag.fill")
+                    .font(.system(size: 14, weight: .bold))
+                    .foregroundStyle(Color.white)
+            }
+            .shadow(radius: 1)
+            .help("All accepted")
+
+        case .allRejected:
+            ZStack {
+                Image(systemName: "flag.fill")
+                    .font(.system(size: 17, weight: .bold))
+                    .foregroundStyle(Color.white)
+                Image(systemName: "flag.fill")
+                    .font(.system(size: 14, weight: .bold))
+                    .foregroundStyle(Color.black)
+            }
+            .shadow(radius: 1)
+            .help("All rejected")
+
+        case .mixed:
+            MixedPickFlagBadge()
+                .help("Mix of accepted and rejected")
+        }
+    }
+}
+
+private struct MixedPickFlagBadge: View {
+    var body: some View {
+        ZStack {
+            Image(systemName: "flag.fill")
+                .font(.system(size: 19, weight: .bold))
+                .foregroundStyle(Color.black)
+
+            Canvas { ctx, size in
+                let rect = CGRect(origin: .zero, size: size)
+
+                var topLeft = Path()
+                topLeft.move(to:    CGPoint(x: rect.minX, y: rect.minY))
+                topLeft.addLine(to: CGPoint(x: rect.maxX, y: rect.minY))
+                topLeft.addLine(to: CGPoint(x: rect.minX, y: rect.maxY))
+                topLeft.closeSubpath()
+
+                var bottomRight = Path()
+                bottomRight.move(to:    CGPoint(x: rect.maxX, y: rect.minY))
+                bottomRight.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY))
+                bottomRight.addLine(to: CGPoint(x: rect.minX, y: rect.maxY))
+                bottomRight.closeSubpath()
+
+                ctx.clip(to: topLeft)
+                ctx.fill(Path(rect), with: .color(.white))
+
+                ctx.clip(to: bottomRight)
+                ctx.fill(Path(rect), with: .color(.black))
+            }
+            .mask {
+                Image(systemName: "flag.fill")
+                    .font(.system(size: 15, weight: .bold))
+            }
+            .frame(width: 19, height: 19)
+        }
+        .shadow(radius: 1)
+    }
+}
+
+// MARK: - BurstStarRangeBadge
+
+struct BurstStarRangeBadge: View {
+
+    private let lo: Int
+    private let hi: Int
+
+    init?(files: [RAWFile]) {
+        let ratings = files.map { $0.starRating }
+        let low  = ratings.min() ?? 0
+        let high = ratings.max() ?? 0
+        guard high > 0 else { return nil }
+        lo = low
+        hi = high
+    }
+
+    var body: some View {
+        HStack(spacing: 2) {
+            Text(lo == hi ? "\(hi)" : "\(lo)–\(hi)")
+                .font(.system(size: 11, weight: .bold))
+            Image(systemName: "star.fill")
+                .font(.system(size: 10, weight: .bold))
+        }
+        .foregroundStyle(Color.yellow)
+        .padding(.horizontal, 6)
+        .padding(.vertical, 3)
+        .background(Color.black, in: Capsule())
+        .shadow(color: .black.opacity(0.8), radius: 3, x: 0, y: 1)
+    }
+}
+
+// MARK: - BurstCountBadge
+
+struct BurstCountBadge: View {
+    let count: Int
+
+    var body: some View {
+        HStack(spacing: 3) {
+            Image(systemName: "square.stack.fill")
+                .font(.system(size: 9, weight: .bold))
+            Text("×\(count)")
+                .font(.system(size: 11, weight: .bold))
+        }
+        .foregroundStyle(Color.white)
+        .padding(.horizontal, 6)
+        .padding(.vertical, 3)
+        .background(Color.black.opacity(0.65), in: Capsule())
+        .shadow(color: .black.opacity(0.6), radius: 3, x: 0, y: 1)
+    }
+}
+
 // MARK: - BurstLabelPickerSheet
-//
-// Visually identical to LabelPickerSheet. Every action applies to all files
-// in the stack. The cover photo's current values are used as the "active"
-// indicator for pick status, stars, and colour — giving a clear, consistent
-// reference state without trying to reconcile mixed states across the burst.
 
 struct BurstLabelPickerSheet: View {
     let stack: BurstStack
     @ObservedObject var manager: SDCardManager
 
-    // Local pick state mirrors LabelPickerSheet — prevents sheet dismissal
-    // on each tap, and is initialised from the cover photo.
     @State private var pickStatus: PickStatus
 
     init(stack: BurstStack, manager: SDCardManager) {
@@ -169,7 +423,6 @@ struct BurstLabelPickerSheet: View {
         _pickStatus = State(initialValue: stack.coverFile.pickStatus)
     }
 
-    /// Live cover file — drives the star and colour indicator.
     private var liveCover: RAWFile? {
         manager.rawFiles.first { $0.id == stack.coverFile.id }
     }
@@ -182,8 +435,6 @@ struct BurstLabelPickerSheet: View {
             // ── Pick row ─────────────────────────────────────────────────
             HStack(spacing: 32) {
                 Spacer()
-
-                // Accept all: white fill, black outline
                 Button {
                     let next: PickStatus = pickStatus == .accepted ? .unpicked : .accepted
                     pickStatus = next
@@ -201,7 +452,6 @@ struct BurstLabelPickerSheet: View {
                 }
                 .buttonStyle(.plain)
 
-                // Reject all: black fill, white outline
                 Button {
                     let next: PickStatus = pickStatus == .rejected ? .unpicked : .rejected
                     pickStatus = next
@@ -218,7 +468,6 @@ struct BurstLabelPickerSheet: View {
                     .opacity(pickStatus == .rejected ? 1.0 : 0.25)
                 }
                 .buttonStyle(.plain)
-
                 Spacer()
             }
 
@@ -241,8 +490,6 @@ struct BurstLabelPickerSheet: View {
             // ── Colour swatches ──────────────────────────────────────────
             HStack(spacing: 14) {
                 Spacer()
-
-                // None swatch
                 Button {
                     manager.setLabelColour(.none, forAllIn: stack)
                 } label: {
@@ -278,32 +525,11 @@ struct BurstLabelPickerSheet: View {
                     }
                     .buttonStyle(.plain)
                 }
-
                 Spacer()
             }
         }
         .padding(.horizontal, 24)
         .padding(.vertical, 20)
         .frame(maxWidth: .infinity)
-    }
-}
-
-// MARK: - Burst count badge
-
-struct BurstCountBadge: View {
-    let count: Int
-
-    var body: some View {
-        HStack(spacing: 3) {
-            Image(systemName: "square.stack.fill")
-                .font(.system(size: 9, weight: .bold))
-            Text("×\(count)")
-                .font(.system(size: 11, weight: .bold))
-        }
-        .foregroundStyle(Color.white)
-        .padding(.horizontal, 6)
-        .padding(.vertical, 3)
-        .background(Color.black.opacity(0.65), in: Capsule())
-        .shadow(color: .black.opacity(0.6), radius: 3, x: 0, y: 1)
     }
 }

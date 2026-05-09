@@ -58,21 +58,16 @@ enum CanonMakernoteParser {
         try? handle.seek(toOffset: 0)
         let headerData = handle.readData(ofLength: readSize)
         let bytes = [UInt8](headerData)
-        print("CanonParser: Read \(bytes.count) bytes from \(url.lastPathComponent)")
 
         let ext = url.pathExtension.lowercased()
 
         // CR3 path — AF data is inside the CMT3 ISOBMFF box
         if ext == "cr3" {
             if let cmt3 = findCMT3(in: bytes) {
-                print("CanonParser: Found CMT3 (\(cmt3.count) bytes)")
                 if let points = parseCanonTIFF(cmt3) {
-                    print("CanonParser: \(points.count) AF point(s), \(points.filter(\.isInFocus).count) in focus")
                     return points
                 }
-                print("CanonParser: parseCanonTIFF returned nil")
             } else {
-                print("CanonParser: CMT3 not found in first 2MB")
             }
             return nil
         }
@@ -82,16 +77,13 @@ enum CanonMakernoteParser {
         // then walk the Makernote IFD to find the AFInfo tag (0x0026).
         if ext == "cr2" {
             if let points = parseCR2Makernote(bytes) {
-                print("CanonParser: \(points.count) AF point(s), \(points.filter(\.isInFocus).count) in focus")
                 return points
             }
-            print("CanonParser: CR2 Makernote AF parse failed")
             return nil
         }
 
         // Fallback for other Canon formats — try CMT3 first, then CR2-style
         if let cmt3 = findCMT3(in: bytes) {
-            print("CanonParser: Found CMT3 (\(cmt3.count) bytes)")
             if let points = parseCanonTIFF(cmt3) {
                 return points
             }
@@ -149,22 +141,18 @@ enum CanonMakernoteParser {
         // Verify TIFF header
         let b0 = bytes[0], b1 = bytes[1]
         guard (b0 == 0x49 && b1 == 0x49) || (b0 == 0x4D && b1 == 0x4D) else {
-            print("CanonParser CR2: not a TIFF file")
             return nil
         }
         let le = b0 == 0x49
         guard readU16(bytes, at: 2, le: le) == 42 else { return nil }
 
         let ifd0Offset = Int(readU32(bytes, at: 4, le: le))
-        print("CanonParser CR2: IFD0 at offset \(ifd0Offset)")
 
         // Walk IFD0 looking for ExifIFD (0x8769) and/or MakerNote via ExifIFD (0x927C)
         guard let makernoteOffset = findMakernoteOffset(bytes, ifdOffset: ifd0Offset, le: le) else {
-            print("CanonParser CR2: Makernote not found")
             return nil
         }
 
-        print("CanonParser CR2: Makernote at offset \(makernoteOffset)")
 
         // Canon Makernote starts with "Canon\0" (6 bytes) then a TIFF IFD
         // The IFD offsets inside the Makernote are relative to the START OF THE FILE,
@@ -174,16 +162,13 @@ enum CanonMakernoteParser {
             bytes[makernoteOffset..<(makernoteOffset+6)].elementsEqual(canonSig)
 
         let ifdStart = hasSig ? makernoteOffset + 6 : makernoteOffset
-        print("CanonParser CR2: Makernote IFD at \(ifdStart) (hasSig=\(hasSig))")
 
         guard ifdStart + 2 < bytes.count else { return nil }
         let entryCount = Int(readU16(bytes, at: ifdStart, le: le))
         guard entryCount > 0 && entryCount < 500 else {
-            print("CanonParser CR2: bad entry count \(entryCount)")
             return nil
         }
 
-        print("CanonParser CR2: Makernote IFD has \(entryCount) entries")
 
         // Canon Makernote IFD value offsets are relative to the Makernote start,
         // not the file start. We try both interpretations and pick the one that
@@ -195,7 +180,6 @@ enum CanonMakernoteParser {
             let tagID = readU16(bytes, at: e, le: le)
             guard tagID == 0x0026 || tagID == 0x0025 || tagID == 0x4013 else { continue }
 
-            print("CanonParser CR2: Found AF tag 0x\(String(format: "%04X", tagID)) at entry \(i)")
 
             let count      = Int(readU32(bytes, at: e + 4, le: le))
             let valOrOff   = Int(readU32(bytes, at: e + 8, le: le))
@@ -216,16 +200,12 @@ enum CanonMakernoteParser {
                 let secondVal = Int(Int16(bitPattern: readU16(payload, at: 2, le: le)))
                 guard (firstVal > 0 && firstVal <= 1000) ||
                       (firstVal > 1000 && secondVal > 0 && secondVal <= 1000) else {
-                    print("CanonParser CR2: offset \(dataStart) gives implausible firstVal=\(firstVal), trying next")
                     continue
                 }
-                print("CanonParser CR2: AF payload \(count) int16 values at offset \(dataStart)")
                 return parseAFPayload(payload, count: count, le: le)
             }
-            print("CanonParser CR2: no valid offset found for AF tag")
         }
 
-        print("CanonParser CR2: AF tag not found in Makernote IFD")
         return nil
     }
 
@@ -288,7 +268,6 @@ enum CanonMakernoteParser {
         let entryCount = Int(readU16(bytes, at: ifd0, le: le))
         guard entryCount > 0 && entryCount < 500 else { return nil }
 
-        print("CanonParser: TIFF IFD has \(entryCount) entries")
 
         for i in 0..<entryCount {
             let e = ifd0 + 2 + i * 12
@@ -300,7 +279,6 @@ enum CanonMakernoteParser {
             // Tag 0x0026 = AFInfo2 (older EOS DSLR models)
             guard tagID == 0x4013 || tagID == 0x0026 || tagID == 0x0025 else { continue }
 
-            print("CanonParser: Found AF tag 0x\(String(format: "%04X", tagID)) at IFD entry \(i)")
 
             let count    = Int(readU32(bytes, at: e + 4, le: le))
             let valOrOff = Int(readU32(bytes, at: e + 8, le: le))
@@ -312,7 +290,6 @@ enum CanonMakernoteParser {
                   dataStart + totalBytes <= bytes.count else { continue }
 
             let payload = Array(bytes[dataStart..<(dataStart + totalBytes)])
-            print("CanonParser: AF payload \(count) int16 values, \(payload.count) bytes")
 
             return parseAFPayload(payload, count: count, le: le)
         }
@@ -353,7 +330,6 @@ enum CanonMakernoteParser {
             && val3 >= 0 && val3 <= val2       // val3 looks like ValidAFPoints
         let offset = isPrefixedLayout ? 2 : 0
         if isPrefixedLayout {
-            print("CanonParser: prefixed layout detected (val0=\(val0) val1=\(val1) val2=\(val2) val3=\(val3))")
         }
 
         let numAFPoints  = s16(offset + 0)
@@ -361,7 +337,6 @@ enum CanonMakernoteParser {
         let afImageW     = CGFloat(s16(offset + 4))
         let afImageH     = CGFloat(s16(offset + 5))
 
-        print("CanonParser: offset=\(offset) numAFPoints=\(numAFPoints) valid=\(validPoints) afW=\(afImageW) afH=\(afImageH)")
 
         guard numAFPoints > 0, numAFPoints <= 1024,
               afImageW > 0, afImageH > 0 else { return nil }
@@ -428,7 +403,6 @@ enum CanonMakernoteParser {
                 height: min(normH, 1)
             )
 
-            print("CanonParser: point[\(i)] x=\(x) y=\(y) w=\(w) h=\(h) inFocus=\(inFocusMask[i]) selected=\(selectedMask[i]) → normRect=\(rect)")
             points.append(CanonAFPoint(normRect: rect, isInFocus: inFocusMask[i], isSelected: selectedMask[i]))
         }
 

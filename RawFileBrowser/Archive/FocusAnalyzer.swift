@@ -168,7 +168,7 @@ struct FocusAnalyzer {
     //  Case 5 — AF + subject, overlap       →  dual score AF point vs subject body;
     //           AF sharp → use AF;  AF degraded → use subject
 
-    static func analyze(url: URL, sharpenIntensity: Double = 0.4) async -> FocusResult {
+    static func analyze(url: URL) async -> FocusResult {
         guard let cgImage = loadThumbnail(from: url, maxDimension: 2048) else {
             return unanalyzed()
         }
@@ -182,8 +182,7 @@ struct FocusAnalyzer {
         let subject = await detectSubject(in: cgImage)
 
         // Step 3 — Route to the correct analysis path
-        return route(cgImage: cgImage, afRect: afRect, subject: subject,
-                     sharpenIntensity: sharpenIntensity)
+        return route(cgImage: cgImage, afRect: afRect, subject: subject)
     }
 
     // MARK: - Routing
@@ -206,8 +205,7 @@ struct FocusAnalyzer {
 
     private static func route(cgImage: CGImage,
                                afRect: CGRect?,
-                               subject: SubjectResult,
-                               sharpenIntensity: Double = 0.4) -> FocusResult {
+                               subject: SubjectResult) -> FocusResult {
 
         let hasAF      = afRect != nil
         let hasSubject = subject.bestRect != nil
@@ -225,10 +223,10 @@ struct FocusAnalyzer {
             ).clamped(to: CGRect(x: 0, y: 0, width: 1, height: 1))
 
             let overlaps: Bool
-            if !subject.contours.isEmpty {
-                // Test centre + all four corners against each subject's contour.
-                // If any sample point is inside any contour, the AF bracket
-                // meaningfully covers at least one subject.
+            if let mask = subject.contourMask {
+                // Use the pre-rasterised bitmask for O(1) point-in-subject tests.
+                // Previously this called the ray-cast algorithm per sample point,
+                // which walked up to 300 polygon vertices each time.
                 let samples = [
                     CGPoint(x: expandedAF.midX, y: expandedAF.midY),
                     CGPoint(x: expandedAF.minX, y: expandedAF.minY),
@@ -236,9 +234,7 @@ struct FocusAnalyzer {
                     CGPoint(x: expandedAF.minX, y: expandedAF.maxY),
                     CGPoint(x: expandedAF.maxX, y: expandedAF.maxY),
                 ]
-                overlaps = subject.contours.contains { contour in
-                    contour.count >= 3 && samples.contains { contourContainsPoint(contour, point: $0) }
-                }
+                overlaps = mask.containsAny(samples)
             } else {
                 overlaps = expandedAF.intersects(subjectBody)
             }
@@ -250,8 +246,7 @@ struct FocusAnalyzer {
                                         afRect: af,
                                         subjectBody: subjectBody,
                                         subject: subject,
-                                        afOnEye: afOnEye,
-                                        sharpenIntensity: sharpenIntensity)
+                                        afOnEye: afOnEye)
             } else {
                 // ── Cases 3 & 4: AF NOT on subject ──────────────────────────
                 return missedFocusResult(cgImage: cgImage,
@@ -260,8 +255,7 @@ struct FocusAnalyzer {
                                          label: subject.label,
                                          confidence: subject.confidence,
                                          afOnEye: afOnEye,
-                                         subjectContour: subject.contours,
-                                         sharpenIntensity: sharpenIntensity)
+                                         subjectContour: subject.contours)
             }
 
         // ── AF only (no subject detected) ────────────────────────────────────
@@ -305,8 +299,7 @@ struct FocusAnalyzer {
                                           afRect: CGRect,
                                           subjectBody: CGRect,
                                           subject: SubjectResult,
-                                          afOnEye: Bool?,
-                                          sharpenIntensity: Double = 0.4) -> FocusResult {
+                                          afOnEye: Bool?) -> FocusResult {
 
         // Score the AF point crop — subject pixels only.
         // Important: do NOT apply a size-confidence penalty to the AF score.
@@ -322,7 +315,7 @@ struct FocusAnalyzer {
         let afRaw = contourMaskedLaplacian(cgImage: cgImage,
                                            normRect: afRect,
                                            contours: subject.contours,
-                                           sharpenIntensity: sharpenIntensity) ?? 0.0
+                                           mask: subject.contourMask) ?? 0.0
         let afThresh  = RegionThresholds.body
         let afFinal   = min(afRaw / afThresh.normalisationDivisor, 1.0)  // no size penalty
 
@@ -331,7 +324,7 @@ struct FocusAnalyzer {
                                                  imageWidth: cgImage.width,
                                                  imageHeight: cgImage.height)
         let bodyCropped  = crop(cgImage, to: subjectBody)
-        let bodyRaw      = bodyCropped.flatMap { rawLaplacian(cgImage: $0, sharpenIntensity: sharpenIntensity) } ?? 0.0
+        let bodyRaw      = bodyCropped.flatMap { rawLaplacian(cgImage: $0) } ?? 0.0
         let bodyThresh   = RegionThresholds.body
         let bodyFinal    = min(bodyRaw / bodyThresh.normalisationDivisor, 1.0) * bodySizeConf
 
@@ -416,13 +409,12 @@ struct FocusAnalyzer {
     /// Strength is deliberately conservative: enough to recover edge detail lost
     /// to JPEG compression, but not enough to inflate scores on genuinely blurry images.
     /// If the filter fails for any reason, the original image is returned unchanged.
-    private static func sharpenCrop(_ image: CGImage, intensity: Double = 0.4) -> CGImage {
-        guard intensity > 0 else { return image }
+    private static func sharpenCrop(_ image: CGImage) -> CGImage {
         let ciImage = CIImage(cgImage: image)
         let filter  = CIFilter(name: "CIUnsharpMask")!
-        filter.setValue(ciImage,   forKey: kCIInputImageKey)
-        filter.setValue(1.0,       forKey: kCIInputRadiusKey)    // edge detection radius in pixels
-        filter.setValue(intensity, forKey: kCIInputIntensityKey) // sharpening strength (0=none, 1=strong)
+        filter.setValue(ciImage, forKey: kCIInputImageKey)
+        filter.setValue(1.0,     forKey: kCIInputRadiusKey)    // edge detection radius in pixels
+        filter.setValue(0.4,     forKey: kCIInputIntensityKey) // sharpening strength (0=none, 1=strong)
         guard let output = filter.outputImage else { return image }
         return ciContext.createCGImage(output, from: output.extent) ?? image
     }
@@ -444,12 +436,14 @@ struct FocusAnalyzer {
     private static func contourMaskedLaplacian(cgImage: CGImage,
                                                normRect: CGRect,
                                                contours: [[CGPoint]],
-                                               sharpenIntensity: Double = 0.4) -> Double? {
+                                               mask: ContourMask? = nil) -> Double? {
         // No contour available — fall back to the standard scorer on the plain crop.
         guard !contours.isEmpty else {
             guard let cropped = crop(cgImage, to: normRect) else { return nil }
-            return rawLaplacian(cgImage: cropped, sharpenIntensity: sharpenIntensity)
+            return rawLaplacian(cgImage: cropped)
         }
+        // Use the pre-built mask if available; otherwise build one now.
+        let contourMask = mask ?? ContourMask(contours: contours)
 
         let imgW = CGFloat(cgImage.width)
         let imgH = CGFloat(cgImage.height)
@@ -471,27 +465,24 @@ struct FocusAnalyzer {
                                   space: CGColorSpaceCreateDeviceRGB(),
                                   bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
         else { return nil }
-        let sharpened = sharpenCrop(cropped, intensity: sharpenIntensity)
+        let sharpened = sharpenCrop(cropped)
         ctx.draw(sharpened, in: CGRect(x: 0, y: 0, width: cropW, height: cropH))
 
-        // Walk every interior pixel. For each one, convert its position back to
-        // normalised image space and test whether it lies inside any subject contour.
-        // Only pixels that pass the test contribute to the Laplacian variance sums.
+        // Walk every interior pixel. For each one, look up its position in the
+        // pre-rasterised bitmask — O(1) vs the previous O(N_vertices) ray-cast.
+        // Only pixels confirmed inside a subject contour contribute to the variance.
         var sumH = 0.0, ssH = 0.0, sumV = 0.0, ssV = 0.0, n = 0.0
 
         for py in 1..<(cropH - 1) {
             for px in 1..<(cropW - 1) {
 
-                // Normalised position of the centre of this pixel in the full image.
+                // Normalised position of this pixel in the full image.
                 let nx = (CGFloat(cropX + px) + 0.5) / imgW
                 let ny = (CGFloat(cropY + py) + 0.5) / imgH
                 let pt = CGPoint(x: nx, y: ny)
 
-                // Skip pixel if it does not belong to any subject contour.
-                let insideSubject = contours.contains { contour in
-                    contour.count >= 3 && contourContainsPoint(contour, point: pt)
-                }
-                guard insideSubject else { continue }
+                // O(1) bitmask lookup replaces per-pixel ray-casting.
+                guard contourMask.contains(pt) else { continue }
 
                 let c = gray(pixels, x: px,   y: py,   w: cropW)
                 let l = gray(pixels, x: px-1, y: py,   w: cropW)
@@ -509,7 +500,7 @@ struct FocusAnalyzer {
         // If no pixels were inside the contour (very small subject, contour mismatch),
         // fall back to the plain scorer so we always return a usable value.
         guard n > 0 else {
-            return rawLaplacian(cgImage: cropped, sharpenIntensity: sharpenIntensity)
+            return rawLaplacian(cgImage: cropped)
         }
 
         let varH = (ssH / n) - pow(sumH / n, 2)
@@ -519,7 +510,7 @@ struct FocusAnalyzer {
 
     /// Computes raw Laplacian variance for a CGImage crop without building a full FocusResult.
     /// Returns the combined sqrt(varH * varV) value — the same metric used in score().
-    private static func rawLaplacian(cgImage: CGImage, sharpenIntensity: Double = 0.4) -> Double? {
+    private static func rawLaplacian(cgImage: CGImage) -> Double? {
         let w = cgImage.width, h = cgImage.height
         guard w > 2 && h > 2 else { return nil }
         let bpr = w * 4
@@ -532,7 +523,7 @@ struct FocusAnalyzer {
         // Apply mild sharpening before scoring to compensate for JPEG compression
         // softening in the embedded preview. This makes the Laplacian a more accurate
         // proxy for the true sharpness of the underlying RAW sensor data.
-        let sharpened = sharpenCrop(cgImage, intensity: sharpenIntensity)
+        let sharpened = sharpenCrop(cgImage)
         ctx.draw(sharpened, in: CGRect(x: 0, y: 0, width: w, height: h))
 
         var sumH = 0.0, ssH = 0.0, sumV = 0.0, ssV = 0.0, n = 0.0
@@ -595,8 +586,7 @@ struct FocusAnalyzer {
                                            label: String?,
                                            confidence: Float?,
                                            afOnEye: Bool? = nil,
-                                           subjectContour: [[CGPoint]] = [],
-                                           sharpenIntensity: Double = 0.4) -> FocusResult {
+                                           subjectContour: [[CGPoint]] = []) -> FocusResult {
 
         let sizeConf   = subjectSizeConfidence(rect: subjectRect,
                                                imageWidth: cgImage.width,
@@ -608,7 +598,7 @@ struct FocusAnalyzer {
         let rawScore: Double
         let finalScore: Double
         if let cropped = crop(cgImage, to: subjectRect), cropped.width > 4, cropped.height > 4,
-           let lap = rawLaplacian(cgImage: cropped, sharpenIntensity: sharpenIntensity) {
+           let lap = rawLaplacian(cgImage: cropped) {
             rawScore   = min(lap / thresholds.normalisationDivisor, 1.0)
             finalScore = rawScore * sizeConf
         } else {
@@ -731,8 +721,59 @@ struct FocusAnalyzer {
         /// One contour per detected subject instance from VNGenerateForegroundInstanceMaskRequest.
         /// Used to draw the subject silhouette overlay. Empty when unavailable.
         let contours:   [[CGPoint]]
+        /// Rasterised bitmask built once from `contours`. Used for O(1) point-in-subject
+        /// tests instead of per-query ray-casting. nil when contours is empty.
+        let contourMask: ContourMask?
         let label:      String?
         let confidence: Float?
+    }
+
+    // MARK: - Rasterised contour mask
+    //
+    // Replaces per-query ray-casting with a one-time bitmask build.
+    // The contour polygon(s) are rasterised into a small grid (128×128) once.
+    // All subsequent point-in-polygon tests become a single array lookup — O(1)
+    // instead of O(N_vertices) — eliminating the main bottleneck in both the
+    // AF-overlap test and the contourMaskedLaplacian pixel loop.
+
+    private struct ContourMask {
+        static let resolution = 128
+        /// Flat boolean grid, row-major. grid[row * resolution + col] = true if inside subject.
+        let grid: [Bool]
+
+        /// Build from an array of normalised (0-1) contour polygons.
+        /// All polygons are combined: a pixel is "inside subject" if it falls inside any one.
+        init(contours: [[CGPoint]]) {
+            let res = ContourMask.resolution
+            var g = [Bool](repeating: false, count: res * res)
+            for row in 0..<res {
+                let ny = (Double(row) + 0.5) / Double(res)
+                for col in 0..<res {
+                    let nx = (Double(col) + 0.5) / Double(res)
+                    let pt = CGPoint(x: nx, y: ny)
+                    for contour in contours where contour.count >= 3 {
+                        if contourContainsPoint(contour, point: pt) {
+                            g[row * res + col] = true
+                            break
+                        }
+                    }
+                }
+            }
+            self.grid = g
+        }
+
+        /// O(1) point-in-subject test. `point` must be in normalised 0-1 image coords.
+        func contains(_ point: CGPoint) -> Bool {
+            let res = ContourMask.resolution
+            let col = min(max(Int(point.x * CGFloat(res)), 0), res - 1)
+            let row = min(max(Int(point.y * CGFloat(res)), 0), res - 1)
+            return grid[row * res + col]
+        }
+
+        /// True if any point in `points` is inside the mask.
+        func containsAny(_ points: [CGPoint]) -> Bool {
+            points.contains { contains($0) }
+        }
     }
 
     private static func detectSubject(in cgImage: CGImage) async -> SubjectResult {
@@ -753,6 +794,10 @@ struct FocusAnalyzer {
         let allContourPoints = contours.flatMap { $0 }
         let contourBodyRect: CGRect? = allContourPoints.isEmpty ? nil : boundingRectWithPadding(allContourPoints, pad: 0.005)
 
+        // Build the rasterised mask once here — all downstream code uses mask lookups
+        // instead of per-query ray-casting, eliminating the main contour perf bottleneck.
+        let mask: ContourMask? = contours.isEmpty ? nil : ContourMask(contours: contours)
+
         if let best = bestAnimalDetection(from: yoloDetections) {
             // YOLO identified the species. Use the contour bbox as bodyRect when
             // available (tighter than YOLO's classifier full-image bbox).
@@ -761,12 +806,13 @@ struct FocusAnalyzer {
             let bodyRect = contourBodyRect ?? (isClassifier ? nil : best.boundingBox)
             let bestRect = best.eyeRect ?? best.headRect
             return SubjectResult(
-                bestRect:   bestRect,
-                eyeRect:    best.eyeRect,
-                bodyRect:   bodyRect,
-                contours:   contours,
-                label:      best.label.capitalized,
-                confidence: best.confidence
+                bestRect:    bestRect,
+                eyeRect:     best.eyeRect,
+                bodyRect:    bodyRect,
+                contours:    contours,
+                contourMask: mask,
+                label:       best.label.capitalized,
+                confidence:  best.confidence
             )
         }
 
@@ -785,36 +831,38 @@ struct FocusAnalyzer {
         if let eyes = animal.eyeRect, eyes.area > 0.0004 {
             return SubjectResult(bestRect: eyes, eyeRect: eyes,
                                  bodyRect: bodyRect(visionRect: animal.bodyRect, visionIsLocalised: true),
-                                 contours: contours,
+                                 contours: contours, contourMask: mask,
                                  label: animal.animalLabel, confidence: nil)
         }
         if let head = animal.headRect {
             return SubjectResult(bestRect: head, eyeRect: nil,
                                  bodyRect: bodyRect(visionRect: animal.bodyRect, visionIsLocalised: true),
-                                 contours: contours,
+                                 contours: contours, contourMask: mask,
                                  label: animal.animalLabel, confidence: nil)
         }
         if let eyes = human.eyeRect, eyes.area > 0.0004 {
             return SubjectResult(bestRect: eyes, eyeRect: eyes,
                                  bodyRect: bodyRect(visionRect: human.faceRect, visionIsLocalised: true),
-                                 contours: contours,
+                                 contours: contours, contourMask: mask,
                                  label: nil, confidence: nil)
         }
         if let face = human.faceRect {
             return SubjectResult(bestRect: face, eyeRect: nil,
                                  bodyRect: bodyRect(visionRect: face, visionIsLocalised: true),
-                                 contours: contours,
+                                 contours: contours, contourMask: mask,
                                  label: nil, confidence: nil)
         }
 
         // No Vision detection. If we have a contour, use its bbox as the subject.
         if let cbr = contourBodyRect {
             return SubjectResult(bestRect: cbr, eyeRect: nil, bodyRect: cbr,
-                                 contours: contours, label: nil, confidence: nil)
+                                 contours: contours, contourMask: mask,
+                                 label: nil, confidence: nil)
         }
 
         return SubjectResult(bestRect: nil, eyeRect: nil, bodyRect: nil,
-                             contours: [], label: nil, confidence: nil)
+                             contours: [], contourMask: nil,
+                             label: nil, confidence: nil)
     }
 
     // MARK: - Foreground subject mask contour (iOS 17+)
