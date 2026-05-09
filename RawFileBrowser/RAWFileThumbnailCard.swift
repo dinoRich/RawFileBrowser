@@ -43,25 +43,24 @@ struct RAWFileThumbnailCard: View {
                     }
                     .frame(width: geo.size.width, height: imgHeight)
                     .clipShape(RoundedRectangle(cornerRadius: 10))
-                    .overlay {
-                        // Colour label outline takes precedence over pick-status outline
-                        if let outlineColor = live.labelColour.swiftUIColor {
-                            RoundedRectangle(cornerRadius: 10)
-                                .strokeBorder(outlineColor, lineWidth: 3)
-                        } else if live.pickStatus == .accepted {
-                            RoundedRectangle(cornerRadius: 10)
-                                .strokeBorder(Color.white, lineWidth: 3)
-                        } else if live.pickStatus == .rejected {
-                            RoundedRectangle(cornerRadius: 10)
-                                .strokeBorder(Color.black, lineWidth: 3)
-                        }
-                    }
 
                     // ── Top-right: star rating badge ─────────────────────
                     if live.starRating > 0 {
                         StarRatingBadge(rating: live.starRating)
                             .frame(maxWidth: .infinity, maxHeight: .infinity,
                                    alignment: .topTrailing)
+                            .padding(6)
+                    }
+
+                    // ── Top-left: colour label swatch ────────────────────
+                    if let swatchColor = live.labelColour.swiftUIColor {
+                        Circle()
+                            .fill(swatchColor)
+                            .frame(width: 20, height: 20)
+                            .background(Circle().fill(.regularMaterial).padding(-3))
+                            .shadow(radius: 1)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity,
+                                   alignment: .topLeading)
                             .padding(6)
                     }
 

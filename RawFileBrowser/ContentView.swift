@@ -15,7 +15,7 @@ struct ContentView: View {
                 }
             }
             .navigationTitle("RAW Browser")
-            .navigationBarTitleDisplayMode(.large)
+            .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {
                     Button { showSettings = true } label: {

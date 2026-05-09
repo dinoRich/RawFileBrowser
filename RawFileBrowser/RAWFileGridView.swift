@@ -181,8 +181,6 @@ struct RAWFileGridView: View {
         VStack(spacing: 0) {
             if manager.isAnalyzing {
                 analysisBanner
-            } else if manager.rawFiles.contains(where: { $0.focusStatus != .unanalyzed }) {
-                analysisSummaryBar
             }
 
             ScrollView(.horizontal, showsIndicators: false) {
@@ -324,29 +322,6 @@ struct RAWFileGridView: View {
         }
         .padding(.horizontal)
         .padding(.vertical, 10)
-        .background(Color(.secondarySystemBackground))
-    }
-
-    private var analysisSummaryBar: some View {
-        HStack(spacing: 16) {
-            Label("\(manager.rawFiles.filter { $0.pickStatus == .accepted }.count) accepted",
-                  systemImage: "flag")
-                .foregroundStyle(.primary)
-
-            Label("\(manager.rejectedCount) rejected",
-                  systemImage: "flag.fill")
-                .foregroundStyle(.secondary)
-
-            Spacer()
-
-            Button("Re-analyze") {
-                Task { await manager.analyzeAllFocus() }
-            }
-            .font(.caption)
-        }
-        .font(.caption.weight(.medium))
-        .padding(.horizontal)
-        .padding(.vertical, 8)
         .background(Color(.secondarySystemBackground))
     }
 

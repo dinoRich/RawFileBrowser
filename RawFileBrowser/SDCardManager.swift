@@ -257,6 +257,7 @@ final class SDCardManager: ObservableObject {
                     rawFiles[i].subjectBodyRawScore   = result.subjectBodyRawScore
                     rawFiles[i].ratingBasis           = result.ratingBasis
                     if !rawFiles[i].pickIsOverridden {
+                        resetOutcomeFields(at: i)
                         if let action = settings?.action(for: result.status) {
                             applyOutcomeAction(action, to: i)
                         }
@@ -299,6 +300,7 @@ final class SDCardManager: ObservableObject {
         rawFiles[idx].subjectBodyRawScore   = result.subjectBodyRawScore
         rawFiles[idx].ratingBasis           = result.ratingBasis
         if !rawFiles[idx].pickIsOverridden {
+            resetOutcomeFields(at: idx)
             if let action = settings?.action(for: result.status) {
                 applyOutcomeAction(action, to: idx)
             }
@@ -485,6 +487,12 @@ final class SDCardManager: ObservableObject {
             results += collectRAWFiles(in: dcim)
         }
         return results
+    }
+
+    private func resetOutcomeFields(at idx: Int) {
+        rawFiles[idx].pickStatus  = .unpicked
+        rawFiles[idx].starRating  = 0
+        rawFiles[idx].labelColour = .none
     }
 
     private func applyOutcomeAction(_ action: FocusOutcomeAction, to idx: Int) {
