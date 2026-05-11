@@ -5,7 +5,8 @@ import SwiftUI
 // A modal settings page presented as a sheet.
 // Shows:
 //   1. A sharpening slider (controls unsharp mask intensity pre-analysis)
-//   2. Three rows — one per focus outcome — each letting the user choose:
+//   2. A species ID confidence threshold slider
+//   3. Three rows — one per focus outcome — each letting the user choose:
 //        • Pick flag (accept / reject / none)
 //        • Star rating (1-5, or none)
 //        • Colour label (red/yellow/green/blue/purple/none)
@@ -42,7 +43,31 @@ struct SettingsView: View {
                     Text("Pre-Analysis Sharpening")
                 }
 
-                // ── Section 2: Focus outcome actions ─────────────────────
+                // ── Section 2: Species ID confidence threshold ────────────────
+                Section {
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack {
+                            Text("Minimum Confidence")
+                                .font(.body)
+                            Spacer()
+                            Text("\(Int(settings.speciesConfidenceThreshold * 100))%")
+                                .font(.body.monospacedDigit())
+                                .foregroundStyle(.secondary)
+                        }
+
+                        Slider(value: $settings.speciesConfidenceThreshold, in: 0...1, step: 0.05)
+                            .tint(.accentColor)
+
+                        Text("Species identifications below this confidence level will be hidden and excluded from XMP files. The detection still runs — only the display is filtered. Default is 50%.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(.vertical, 4)
+                } header: {
+                    Text("Species ID Threshold")
+                }
+
+                // ── Section 3: Focus outcome actions ─────────────────────
                 Section {
                     OutcomeRow(
                         label: "Sharp",

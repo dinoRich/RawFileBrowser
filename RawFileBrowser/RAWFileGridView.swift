@@ -31,31 +31,52 @@ struct RAWFileGridView: View {
     }
 
     enum FilterMode: String, CaseIterable {
-        case all        = "All"
-        case bursts     = "Bursts"
-        case accepted   = "Accepted"
-        case rejected   = "Rejected"
-        case sharp      = "Sharp"
-        case unanalyzed = "Unanalyzed"
+        case all          = "All"
+        case bursts       = "Bursts"
+        case accepted     = "Accepted"
+        case rejected     = "Rejected"
+        case sharp        = "Sharp"
+        case slightlyBlur = "Slightly Blurry"
+        case blurry       = "Blurry"
+        case unanalyzed   = "Unanalyzed"
+        case star1        = "★ 1"
+        case star2        = "★★ 2"
+        case star3        = "★★★ 3"
+        case star4        = "★★★★ 4"
+        case star5        = "★★★★★ 5"
+        case colourRed    = "Red"
+        case colourYellow = "Yellow"
+        case colourGreen  = "Green"
+        case colourBlue   = "Blue"
+        case colourPurple = "Purple"
     }
 
     // MARK: - Pill counts
 
-    private var burstPhotoCount: Int {
-        manager.gridItems.reduce(0) { total, item in
-            if case .stack(let s) = item { return total + s.count }
-            return total
-        }
+    private var burstStackCount: Int {
+        manager.gridItems.filter { if case .stack = $0 { return true }; return false }.count
     }
 
     private func pillCount(for mode: FilterMode) -> Int {
         switch mode {
-        case .all:        return manager.rawFiles.count
-        case .bursts:     return burstPhotoCount
-        case .accepted:   return manager.rawFiles.filter { $0.pickStatus == .accepted }.count
-        case .rejected:   return manager.rawFiles.filter { $0.pickStatus == .rejected }.count
-        case .sharp:      return manager.rawFiles.filter { $0.focusStatus == .sharp }.count
-        case .unanalyzed: return manager.rawFiles.filter { $0.focusStatus == .unanalyzed }.count
+        case .all:          return manager.rawFiles.count
+        case .bursts:       return burstStackCount
+        case .accepted:     return manager.rawFiles.filter { $0.pickStatus == .accepted }.count
+        case .rejected:     return manager.rawFiles.filter { $0.pickStatus == .rejected }.count
+        case .sharp:        return manager.rawFiles.filter { $0.focusStatus == .sharp }.count
+        case .slightlyBlur: return manager.rawFiles.filter { $0.focusStatus == .slightlyBlur }.count
+        case .blurry:       return manager.rawFiles.filter { $0.focusStatus == .blurry }.count
+        case .unanalyzed:   return manager.rawFiles.filter { $0.focusStatus == .unanalyzed }.count
+        case .star1:        return manager.rawFiles.filter { $0.starRating == 1 }.count
+        case .star2:        return manager.rawFiles.filter { $0.starRating == 2 }.count
+        case .star3:        return manager.rawFiles.filter { $0.starRating == 3 }.count
+        case .star4:        return manager.rawFiles.filter { $0.starRating == 4 }.count
+        case .star5:        return manager.rawFiles.filter { $0.starRating == 5 }.count
+        case .colourRed:    return manager.rawFiles.filter { $0.labelColour == .red }.count
+        case .colourYellow: return manager.rawFiles.filter { $0.labelColour == .yellow }.count
+        case .colourGreen:  return manager.rawFiles.filter { $0.labelColour == .green }.count
+        case .colourBlue:   return manager.rawFiles.filter { $0.labelColour == .blue }.count
+        case .colourPurple: return manager.rawFiles.filter { $0.labelColour == .purple }.count
         }
     }
 
@@ -63,7 +84,7 @@ struct RAWFileGridView: View {
         FilterMode.allCases.filter { mode in
             switch mode {
             case .all:    return true
-            case .bursts: return burstPhotoCount > 0
+            case .bursts: return burstStackCount > 0
             default:      return pillCount(for: mode) > 0
             }
         }
@@ -132,7 +153,19 @@ struct RAWFileGridView: View {
         case .accepted:     return file.pickStatus == .accepted
         case .rejected:     return file.pickStatus == .rejected
         case .sharp:        return file.focusStatus == .sharp
+        case .slightlyBlur: return file.focusStatus == .slightlyBlur
+        case .blurry:       return file.focusStatus == .blurry
         case .unanalyzed:   return file.focusStatus == .unanalyzed
+        case .star1:        return file.starRating == 1
+        case .star2:        return file.starRating == 2
+        case .star3:        return file.starRating == 3
+        case .star4:        return file.starRating == 4
+        case .star5:        return file.starRating == 5
+        case .colourRed:    return file.labelColour == .red
+        case .colourYellow: return file.labelColour == .yellow
+        case .colourGreen:  return file.labelColour == .green
+        case .colourBlue:   return file.labelColour == .blue
+        case .colourPurple: return file.labelColour == .purple
         }
     }
 
@@ -308,7 +341,22 @@ struct RAWFileGridView: View {
                     }
                 }
 
-                // 3 ── Select / Done ──────────────────────────────────────
+                // 3 ── Select All / Deselect All (only visible in select mode) ──
+                if isSelectMode {
+                    let allIDs = Set(filteredGridItems.map { $0.id })
+                    let allSelected = allIDs == selectedItemIDs
+                    Button {
+                        if allSelected {
+                            selectedItemIDs = []
+                        } else {
+                            selectedItemIDs = allIDs
+                        }
+                    } label: {
+                        Text("All")
+                    }
+                }
+
+                // 3b ── Enter / Exit select mode ─────────────────────────────────
                 Button {
                     if isSelectMode {
                         isSelectMode = false
@@ -317,7 +365,8 @@ struct RAWFileGridView: View {
                         isSelectMode = true
                     }
                 } label: {
-                    Image(systemName: isSelectMode ? "checkmark.circle.fill" : "checkmark.circle")
+                    Text(isSelectMode ? "Done" : "Select")
+                        .font(.body)
                 }
 
                 // 4 ── Save XMP (floppy disk) ─────────────────────────────

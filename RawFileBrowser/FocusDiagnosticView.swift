@@ -134,7 +134,8 @@ struct FocusDiagnosticView: View {
                         }
 
                         if let label = file.detectedAnimalLabel {
-                            DiagRow("Detected species",  value: label)
+                            DiagRow("Detected species",  value: label,
+                                    detail: "Raw detection result (shown regardless of display threshold)")
                         }
                     }
 

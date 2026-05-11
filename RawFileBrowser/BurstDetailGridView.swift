@@ -30,12 +30,24 @@ struct BurstDetailGridView: View {
     /// Count of files in this stack matching a given filter mode.
     private func count(for mode: RAWFileGridView.FilterMode) -> Int {
         switch mode {
-        case .all:        return liveFiles.count
-        case .bursts:     return 0   // not applicable inside a stack
-        case .accepted:   return liveFiles.filter { $0.pickStatus == .accepted }.count
-        case .rejected:   return liveFiles.filter { $0.pickStatus == .rejected }.count
-        case .sharp:      return liveFiles.filter { $0.focusStatus == .sharp }.count
-        case .unanalyzed: return liveFiles.filter { $0.focusStatus == .unanalyzed }.count
+        case .all:          return liveFiles.count
+        case .bursts:       return 0   // not applicable inside a stack
+        case .accepted:     return liveFiles.filter { $0.pickStatus == .accepted }.count
+        case .rejected:     return liveFiles.filter { $0.pickStatus == .rejected }.count
+        case .sharp:        return liveFiles.filter { $0.focusStatus == .sharp }.count
+        case .slightlyBlur: return liveFiles.filter { $0.focusStatus == .slightlyBlur }.count
+        case .blurry:       return liveFiles.filter { $0.focusStatus == .blurry }.count
+        case .unanalyzed:   return liveFiles.filter { $0.focusStatus == .unanalyzed }.count
+        case .star1:        return liveFiles.filter { $0.starRating == 1 }.count
+        case .star2:        return liveFiles.filter { $0.starRating == 2 }.count
+        case .star3:        return liveFiles.filter { $0.starRating == 3 }.count
+        case .star4:        return liveFiles.filter { $0.starRating == 4 }.count
+        case .star5:        return liveFiles.filter { $0.starRating == 5 }.count
+        case .colourRed:    return liveFiles.filter { $0.labelColour == .red }.count
+        case .colourYellow: return liveFiles.filter { $0.labelColour == .yellow }.count
+        case .colourGreen:  return liveFiles.filter { $0.labelColour == .green }.count
+        case .colourBlue:   return liveFiles.filter { $0.labelColour == .blue }.count
+        case .colourPurple: return liveFiles.filter { $0.labelColour == .purple }.count
         }
     }
 
@@ -46,7 +58,19 @@ struct BurstDetailGridView: View {
         case .accepted:     return liveFiles.filter { $0.pickStatus == .accepted }
         case .rejected:     return liveFiles.filter { $0.pickStatus == .rejected }
         case .sharp:        return liveFiles.filter { $0.focusStatus == .sharp }
+        case .slightlyBlur: return liveFiles.filter { $0.focusStatus == .slightlyBlur }
+        case .blurry:       return liveFiles.filter { $0.focusStatus == .blurry }
         case .unanalyzed:   return liveFiles.filter { $0.focusStatus == .unanalyzed }
+        case .star1:        return liveFiles.filter { $0.starRating == 1 }
+        case .star2:        return liveFiles.filter { $0.starRating == 2 }
+        case .star3:        return liveFiles.filter { $0.starRating == 3 }
+        case .star4:        return liveFiles.filter { $0.starRating == 4 }
+        case .star5:        return liveFiles.filter { $0.starRating == 5 }
+        case .colourRed:    return liveFiles.filter { $0.labelColour == .red }
+        case .colourYellow: return liveFiles.filter { $0.labelColour == .yellow }
+        case .colourGreen:  return liveFiles.filter { $0.labelColour == .green }
+        case .colourBlue:   return liveFiles.filter { $0.labelColour == .blue }
+        case .colourPurple: return liveFiles.filter { $0.labelColour == .purple }
         }
     }
 

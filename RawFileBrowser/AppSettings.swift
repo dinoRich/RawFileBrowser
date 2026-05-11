@@ -41,6 +41,15 @@ final class AppSettings: ObservableObject {
         didSet { UserDefaults.standard.set(sharpenIntensity, forKey: "sharpenIntensity") }
     }
 
+    // ── Species ID confidence threshold ──────────────────────────────────
+    /// Minimum YOLO confidence (0–1) required before a detected species name
+    /// is shown in the UI or written to an XMP sidecar.
+    /// Detection always runs in full — this only controls what is displayed.
+    /// Default 0.5 (50 %).
+    @Published var speciesConfidenceThreshold: Double {
+        didSet { UserDefaults.standard.set(speciesConfidenceThreshold, forKey: "speciesConfidenceThreshold") }
+    }
+
     // ── Focus outcome actions ────────────────────────────────────────────
     /// What to do automatically when a photo is rated Sharp.
     @Published var sharpAction: FocusOutcomeAction {
@@ -60,6 +69,9 @@ final class AppSettings: ObservableObject {
     init() {
         // Sharpening — default 0.4
         self.sharpenIntensity = UserDefaults.standard.object(forKey: "sharpenIntensity") as? Double ?? 0.4
+
+        // Species confidence threshold — default 0.5 (50 %)
+        self.speciesConfidenceThreshold = UserDefaults.standard.object(forKey: "speciesConfidenceThreshold") as? Double ?? 0.5
 
         // Outcome actions — sensible defaults that match the previous hardcoded behaviour:
         //   sharp        → accepted
@@ -84,6 +96,19 @@ final class AppSettings: ObservableObject {
         if let data = try? JSONEncoder().encode(action) {
             UserDefaults.standard.set(data, forKey: key)
         }
+    }
+
+    // MARK: - Species display helper
+    //
+    // Returns the species label only when the detection confidence meets
+    // the user-configured threshold. Pass nil confidence (Vision fallback)
+    // to always show — Vision does not produce a numeric confidence score.
+
+    func visibleSpeciesLabel(label: String?, confidence: Float?) -> String? {
+        guard let label else { return nil }
+        // Vision fallback has no numeric confidence — always show it.
+        guard let confidence else { return label }
+        return Double(confidence) >= speciesConfidenceThreshold ? label : nil
     }
 
     // MARK: - Apply to a file

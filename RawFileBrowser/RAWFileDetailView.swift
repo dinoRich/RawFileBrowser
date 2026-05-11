@@ -8,6 +8,7 @@ struct RAWFileDetailView: View {
     /// Index into fileIDs to open first.
     let startIndex: Int
     @ObservedObject var manager: SDCardManager
+    @EnvironmentObject var settings: AppSettings
     /// Called when Done is tapped, passing the UUID of the photo last on screen.
     var onDismiss: (UUID) -> Void = { _ in }
 
@@ -34,6 +35,7 @@ struct RAWFileDetailView: View {
     @State private var xmpMessage: String? = nil
     @State private var showDiagnostics = false
     @State private var showLabelSheet  = false
+    @State private var showOverflowMenu = false
 
     // Zoom + pan state
     @State private var scale: CGFloat       = 1.0
@@ -46,7 +48,7 @@ struct RAWFileDetailView: View {
 
     // Overlay toggles
     @State private var showAnalysisOverlay  = true
-    @State private var showAFPointOverlay   = false
+    @State private var showAFPointOverlay   = true
 
     // AF point rect extracted from EXIF (normalised 0-1, top-left origin)
     @State private var afPoints: [CanonAFPoint] = []
@@ -158,64 +160,96 @@ struct RAWFileDetailView: View {
                                             }
                                         }
                                 )
-                                // Double-tap → 50% actual image size (or reset if already zoomed)
-                                .onTapGesture(count: 2) {
-                                    let imageAspect     = img.size.width / img.size.height
-                                    let containerAspect = geo.size.width / geo.size.height
-                                    let fitRenderedW: CGFloat = imageAspect > containerAspect
-                                        ? geo.size.width
-                                        : geo.size.height * imageAspect
-                                    let fitFactor = fitRenderedW / img.size.width
-                                    let target50 = max(1.0, 0.5 / fitFactor)
-                                    withAnimation(.spring(response: 0.35)) {
-                                        if scale > 1.0 {
-                                            scale      = 1.0
-                                            lastScale  = 1.0
-                                            offset     = .zero
-                                            lastOffset = .zero
-                                        } else {
-                                            scale     = target50
-                                            lastScale = target50
+                                // Double-tap → 50% actual size centred on tap point (or reset)
+                                .gesture(
+                                    SpatialTapGesture(count: 2)
+                                        .onEnded { tap in
+                                            let imageAspect     = img.size.width / img.size.height
+                                            let containerAspect = geo.size.width / geo.size.height
+                                            let fitRenderedW: CGFloat = imageAspect > containerAspect
+                                                ? geo.size.width
+                                                : geo.size.height * imageAspect
+                                            let fitFactor = fitRenderedW / img.size.width
+                                            let target50 = max(1.0, 0.5 / fitFactor)
+                                            withAnimation(.spring(response: 0.35)) {
+                                                if scale > 1.0 {
+                                                    scale      = 1.0
+                                                    lastScale  = 1.0
+                                                    offset     = .zero
+                                                    lastOffset = .zero
+                                                } else {
+                                                    let cx = geo.size.width  / 2
+                                                    let cy = geo.size.height / 2
+                                                    let newOffset = CGSize(
+                                                        width:  (cx - tap.location.x) * (target50 - 1),
+                                                        height: (cy - tap.location.y) * (target50 - 1)
+                                                    )
+                                                    scale      = target50
+                                                    lastScale  = target50
+                                                    offset     = clampedOffset(
+                                                        offset: newOffset,
+                                                        scale: target50,
+                                                        containerSize: geo.size,
+                                                        imageSize: img.size
+                                                    )
+                                                    lastOffset = offset
+                                                }
+                                            }
+                                            showZoomIndicator = true
+                                            zoomHideTask?.cancel()
+                                            zoomHideTask = Task {
+                                                try? await Task.sleep(nanoseconds: 1_500_000_000)
+                                                if !Task.isCancelled {
+                                                    withAnimation { showZoomIndicator = false }
+                                                }
+                                            }
                                         }
-                                    }
-                                    showZoomIndicator = true
-                                    zoomHideTask?.cancel()
-                                    zoomHideTask = Task {
-                                        try? await Task.sleep(nanoseconds: 1_500_000_000)
-                                        if !Task.isCancelled {
-                                            withAnimation { showZoomIndicator = false }
+                                )
+                                // Triple-tap → 100% actual size centred on tap point (or reset)
+                                .gesture(
+                                    SpatialTapGesture(count: 3)
+                                        .onEnded { tap in
+                                            let imageAspect     = img.size.width / img.size.height
+                                            let containerAspect = geo.size.width / geo.size.height
+                                            let fitRenderedW: CGFloat = imageAspect > containerAspect
+                                                ? geo.size.width
+                                                : geo.size.height * imageAspect
+                                            let fitFactor = fitRenderedW / img.size.width
+                                            let target100 = max(1.0, 1.0 / fitFactor)
+                                            withAnimation(.spring(response: 0.35)) {
+                                                if scale >= target100 * 0.95 {
+                                                    scale      = 1.0
+                                                    lastScale  = 1.0
+                                                    offset     = .zero
+                                                    lastOffset = .zero
+                                                } else {
+                                                    let cx = geo.size.width  / 2
+                                                    let cy = geo.size.height / 2
+                                                    let newOffset = CGSize(
+                                                        width:  (cx - tap.location.x) * (target100 - 1),
+                                                        height: (cy - tap.location.y) * (target100 - 1)
+                                                    )
+                                                    scale      = target100
+                                                    lastScale  = target100
+                                                    offset     = clampedOffset(
+                                                        offset: newOffset,
+                                                        scale: target100,
+                                                        containerSize: geo.size,
+                                                        imageSize: img.size
+                                                    )
+                                                    lastOffset = offset
+                                                }
+                                            }
+                                            showZoomIndicator = true
+                                            zoomHideTask?.cancel()
+                                            zoomHideTask = Task {
+                                                try? await Task.sleep(nanoseconds: 1_500_000_000)
+                                                if !Task.isCancelled {
+                                                    withAnimation { showZoomIndicator = false }
+                                                }
+                                            }
                                         }
-                                    }
-                                }
-                                // Triple-tap → 100% actual image size (or reset if already at 100%)
-                                .onTapGesture(count: 3) {
-                                    let imageAspect     = img.size.width / img.size.height
-                                    let containerAspect = geo.size.width / geo.size.height
-                                    let fitRenderedW: CGFloat = imageAspect > containerAspect
-                                        ? geo.size.width
-                                        : geo.size.height * imageAspect
-                                    let fitFactor = fitRenderedW / img.size.width
-                                    let target100 = max(1.0, 1.0 / fitFactor)
-                                    withAnimation(.spring(response: 0.35)) {
-                                        if scale >= target100 * 0.95 {
-                                            scale      = 1.0
-                                            lastScale  = 1.0
-                                            offset     = .zero
-                                            lastOffset = .zero
-                                        } else {
-                                            scale     = target100
-                                            lastScale = target100
-                                        }
-                                    }
-                                    showZoomIndicator = true
-                                    zoomHideTask?.cancel()
-                                    zoomHideTask = Task {
-                                        try? await Task.sleep(nanoseconds: 1_500_000_000)
-                                        if !Task.isCancelled {
-                                            withAnimation { showZoomIndicator = false }
-                                        }
-                                    }
-                                }
+                                )
 
                             // Analysis region overlay
                             if showAnalysisOverlay, let normRect = file.analysisRect {
@@ -227,7 +261,10 @@ struct RAWFileDetailView: View {
                                     scale: scale,
                                     offset: offset,
                                     subjectContour: file.subjectContour,
-                                    detectedLabel: file.detectedAnimalLabel
+                                    detectedLabel: settings.visibleSpeciesLabel(
+                                        label: file.detectedAnimalLabel,
+                                        confidence: file.detectionConfidence
+                                    )
                                 )
                             }
 
@@ -298,6 +335,8 @@ struct RAWFileDetailView: View {
             .navigationTitle(file.name)
             .navigationBarTitleDisplayMode(.inline)
             .toolbarColorScheme(.dark, for: .navigationBar)
+            .toolbarBackground(Color.black.opacity(0.75), for: .navigationBar)
+            .toolbarBackground(.visible, for: .navigationBar)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Done") {
@@ -318,71 +357,41 @@ struct RAWFileDetailView: View {
 
                 ToolbarItemGroup(placement: .navigationBarTrailing) {
 
-                    // Analysis region overlay toggle
-                    if file.analysisRect != nil {
-                        Button {
-                            withAnimation { showAnalysisOverlay.toggle() }
-                        } label: {
-                            Image(systemName: showAnalysisOverlay
-                                  ? "viewfinder.circle.fill" : "viewfinder.circle")
-                        }.foregroundStyle(.white)
+                    // ── 1. Focus Analyser — leftmost (circle.dashed, matches grid view) ─
+                    Button {
+                        Task { await manager.analyzeFocus(for: file) }
+                    } label: {
+                        Image(systemName: "circle.dashed")
                     }
+                    .foregroundStyle(file.focusStatus == .unanalyzed ? .white : .white.opacity(0.4))
+                    .disabled(file.focusStatus != .unanalyzed)
 
-                    // AF point overlay toggle — only shown when EXIF AF data exists
+                    // ── 2. AF point overlay toggle — inverted colours when ON ──────────
                     if !afPoints.isEmpty {
                         Button {
                             withAnimation { showAFPointOverlay.toggle() }
                         } label: {
                             Image(systemName: showAFPointOverlay
-                                  ? "scope" : "scope")
-                                .foregroundStyle(showAFPointOverlay ? .yellow : .white)
+                                  ? "viewfinder.circle.fill" : "viewfinder.circle")
+                                .padding(5)
+                                .background(showAFPointOverlay ? Color.white : Color.clear)
+                                .clipShape(RoundedRectangle(cornerRadius: 6))
+                                .foregroundStyle(showAFPointOverlay ? .black : .white)
                         }
                     }
 
-                    // On-demand focus analysis
-                    if file.focusStatus == .unanalyzed {
-                        Button {
-                            Task { await manager.analyzeFocus(for: file) }
-                        } label: {
-                            Image(systemName: "circle.dashed")
-                        }.foregroundStyle(.white)
-                    }
-
+                    // ── 3. Diagnostics (stethoscope) ─────────────────────────────────
                     Button { showDiagnostics.toggle() } label: {
                         Image(systemName: "stethoscope")
                     }
                     .foregroundStyle(file.focusStatus != .unanalyzed ? .white : .white.opacity(0.4))
                     .disabled(file.focusStatus == .unanalyzed)
 
-                    Button { showMetadata.toggle() } label: {
-                        Image(systemName: "info.circle")
-                    }.foregroundStyle(.white)
-
-                    Button { showShareSheet = true } label: {
-                        Image(systemName: "square.and.arrow.up")
-                    }
-                    .foregroundStyle(.white)
-                    .disabled(fullImage == nil)
-
-                    // Write XMP
-                    if file.detectedAnimalLabel != nil {
-                        Button {
-                            do {
-                                try XMPSidecarWriter.write(for: file)
-                                manager.markXMPWritten(for: file)
-                                xmpMessage = "XMP written for \(file.detectedAnimalLabel ?? "")"
-                            } catch {
-                                xmpMessage = error.localizedDescription
-                            }
-                        } label: {
-                            Image(systemName: file.xmpWritten ? "tag.fill" : "tag")
-                        }
-                        .foregroundStyle(file.xmpWritten ? .green : .white)
-                    }
-
-                    // Label / pick sheet button — always visible, reflects pick state
-                    Button { showLabelSheet = true } label: {
-                        Image(systemName: file.pickStatus != .unpicked ? "flag.fill" : "flag")
+                    // ── 4. Overflow menu — secondary actions ─────────────────────────
+                    Button {
+                        showOverflowMenu = true
+                    } label: {
+                        Image(systemName: "ellipsis.circle")
                             .foregroundStyle(.white)
                     }
                 }
@@ -411,6 +420,30 @@ struct RAWFileDetailView: View {
             Button("OK") { xmpMessage = nil }
         } message: {
             Text(xmpMessage ?? "")
+        }
+        .confirmationDialog("", isPresented: $showOverflowMenu, titleVisibility: .hidden) {
+            Button("Metadata") { showMetadata = true }
+            if fullImage != nil {
+                Button("Share") { showShareSheet = true }
+            }
+            if settings.visibleSpeciesLabel(label: file.detectedAnimalLabel, confidence: file.detectionConfidence) != nil {
+                Button(file.xmpWritten ? "XMP Already Written" : "Write XMP") {
+                    if !file.xmpWritten {
+                        do {
+                            try XMPSidecarWriter.write(for: file)
+                            manager.markXMPWritten(for: file)
+                            xmpMessage = "XMP written for \(file.detectedAnimalLabel ?? String())"
+                        } catch {
+                            xmpMessage = error.localizedDescription
+                        }
+                    }
+                }
+                .disabled(file.xmpWritten)
+            }
+            Button(file.pickStatus != .unpicked ? "Change Flag" : "Set Flag") {
+                showLabelSheet = true
+            }
+            Button("Cancel", role: .cancel) {}
         }
         .task(id: currentFileID) {
             // Reload the image every time currentFileID changes (i.e. after a swipe)
@@ -512,7 +545,7 @@ struct RAWFileDetailView: View {
             .buttonStyle(.plain)
             if file.focusStatus != .unanalyzed {
                 VStack(spacing: 5) {
-                    if let label = file.detectedAnimalLabel {
+                    if let label = settings.visibleSpeciesLabel(label: file.detectedAnimalLabel, confidence: file.detectionConfidence) {
                         HStack(spacing: 4) {
                             Image(systemName: "pawprint.fill")
                             Text(label.replacingOccurrences(of: "_", with: " ").capitalized)
