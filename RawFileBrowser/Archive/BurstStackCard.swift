@@ -57,11 +57,16 @@ struct BurstStackCard: View {
             GeometryReader { geo in
                 let totalW = geo.size.width
                 let totalH = geo.size.width * 3 / 4
-                let step: CGFloat = 8
+                let step: CGFloat = 5          // smaller step = less whitespace around photo
 
                 let cardW = totalW - step * 2
                 let cardH = totalH - step * 2
 
+                // Outer ZStack spans the full cell (totalW × totalH).
+                // Shadow layers and the front card sit inside it.
+                // Badges are placed here — in the full-cell space — so they
+                // are never clipped by the front card's rounded corners and
+                // always have the same room as badges on single-photo thumbnails.
                 ZStack(alignment: .topLeading) {
 
                     // ── Back shadow ──────────────────────────────────────
@@ -76,9 +81,8 @@ struct BurstStackCard: View {
                         .frame(width: cardW, height: cardH)
                         .offset(x: step, y: step)
 
-                    // ── Front card — top-left flush, smaller than box ────
-                    ZStack(alignment: .bottomLeading) {
-
+                    // ── Front card — photo only, no badges inside ────────
+                    ZStack {
                         RoundedRectangle(cornerRadius: 10)
                             .fill(Color(.secondarySystemBackground))
 
@@ -97,40 +101,6 @@ struct BurstStackCard: View {
                                 .foregroundStyle(.secondary)
                                 .frame(width: cardW, height: cardH)
                         }
-
-                        // Top-left: colour swatches (up to 3, one per unique colour)
-                        BurstColourSwatches(files: files)
-                            .frame(width: cardW, height: cardH,
-                                   alignment: .topLeading)
-                            .padding(6)
-
-                        // Top-centre: stack count badge
-                        BurstCountBadge(count: visibleCount)
-                            .frame(width: cardW, height: cardH,
-                                   alignment: .top)
-                            .padding(.top, 6)
-
-                        // Top-right: star-range badge
-                        if let starBadge = BurstStarRangeBadge(files: files) {
-                            starBadge
-                                .frame(width: cardW, height: cardH,
-                                       alignment: .topTrailing)
-                                .padding(6)
-                        }
-
-                        // Bottom-left: focus-range pill
-                        if let focusPill = BurstFocusRangePill(files: files) {
-                            focusPill
-                                .frame(width: cardW, height: cardH,
-                                       alignment: .bottomLeading)
-                                .padding(6)
-                        }
-
-                        // Bottom-right: pick-flag badge
-                        BurstPickBadge(files: files)
-                            .frame(width: cardW, height: cardH,
-                                   alignment: .bottomTrailing)
-                            .padding(6)
                     }
                     .frame(width: cardW, height: cardH)
                     .clipShape(RoundedRectangle(cornerRadius: 10))
@@ -142,6 +112,45 @@ struct BurstStackCard: View {
                         }
                     }
                     // No offset — front card at (0,0), top-left flush
+
+                    // ── Badges — positioned in full-cell space ───────────
+                    // Using maxWidth/maxHeight: .infinity mirrors exactly how
+                    // RAWFileThumbnailCard positions its badges, ensuring they
+                    // sit clear of the front card's rounded corners.
+
+                    // Top-left: colour swatches (up to 3, one per unique colour)
+                    BurstColourSwatches(files: files)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity,
+                               alignment: .topLeading)
+                        .padding(6)
+
+                    // Top-centre: stack count badge
+                    BurstCountBadge(count: visibleCount)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity,
+                               alignment: .top)
+                        .padding(.top, 6)
+
+                    // Top-right: star-range badge
+                    if let starBadge = BurstStarRangeBadge(files: files) {
+                        starBadge
+                            .frame(maxWidth: .infinity, maxHeight: .infinity,
+                                   alignment: .topTrailing)
+                            .padding(6)
+                    }
+
+                    // Bottom-left: focus-range pill
+                    if let focusPill = BurstFocusRangePill(files: files) {
+                        focusPill
+                            .frame(maxWidth: .infinity, maxHeight: .infinity,
+                                   alignment: .bottomLeading)
+                            .padding(6)
+                    }
+
+                    // Bottom-right: pick-flag badge
+                    BurstPickBadge(files: files)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity,
+                               alignment: .bottomTrailing)
+                        .padding(6)
                 }
                 .frame(width: totalW, height: totalH, alignment: .topLeading)
                 .clipped()

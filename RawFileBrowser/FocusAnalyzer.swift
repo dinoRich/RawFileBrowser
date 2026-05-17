@@ -174,16 +174,18 @@ struct FocusAnalyzer {
         }
 
         // Step 1 — AF point from camera Makernote
-        let afRect = extractAFRegion(from: url,
-                                     imageWidth: cgImage.width,
-                                     imageHeight: cgImage.height)
+        let afRegion    = extractAFRegion(from: url,
+                                          imageWidth: cgImage.width,
+                                          imageHeight: cgImage.height)
+        let afRect      = afRegion?.rect
+        let afConfirmed = afRegion?.confirmed ?? false
 
         // Step 2 — Subject detection (YOLO first, Vision fallback)
         let subject = await detectSubject(in: cgImage)
 
         // Step 3 — Route to the correct analysis path
-        return route(cgImage: cgImage, afRect: afRect, subject: subject,
-                     sharpenIntensity: sharpenIntensity)
+        return route(cgImage: cgImage, afRect: afRect, afConfirmed: afConfirmed,
+                     subject: subject, sharpenIntensity: sharpenIntensity)
     }
 
     // MARK: - Routing
@@ -206,6 +208,7 @@ struct FocusAnalyzer {
 
     private static func route(cgImage: CGImage,
                                afRect: CGRect?,
+                               afConfirmed: Bool = false,
                                subject: SubjectResult,
                                sharpenIntensity: Double = 0.4) -> FocusResult {
 
@@ -248,6 +251,7 @@ struct FocusAnalyzer {
                 // ── Case 5: AF on subject — dual score ──────────────────────
                 return scoreAFOnSubject(cgImage: cgImage,
                                         afRect: af,
+                                        afConfirmed: afConfirmed,
                                         subjectBody: subjectBody,
                                         subject: subject,
                                         afOnEye: afOnEye,
@@ -297,12 +301,27 @@ struct FocusAnalyzer {
     // MARK: - Case 5 dual-score: AF intersects subject
 
     /// Scores both the AF point rect and the subject body rect independently,
-    /// then decides which to use as the final rating:
-    ///   • AF score meets sharp threshold   → use AF score (camera nailed it)
-    ///   • AF score below sharp, subject meets acceptable → use subject score + note degraded AF
-    ///   • Both poor                        → use subject score (more representative)
+    /// then decides which to use as the final rating.
+    ///
+    /// Core principle: the subject body score is the most consistent ground truth.
+    /// It covers feathers/fur regardless of where the AF point sits, giving the
+    /// same reading for two equally-sharp photos of the same subject.
+    ///
+    /// The AF point score is used ONLY as a bonus confirmation when ALL THREE
+    /// conditions are met:
+    ///   (a) the camera reported a confirmed focus lock (isInFocus = true)
+    ///   (b) the AF score beats the body score by at least afBoostMargin — i.e. it
+    ///       is genuinely informative, not just noisily different
+    ///   (c) the body score is already near-sharp (within borderlineMargin of the
+    ///       sharp threshold) — the AF point confirms, not overrides
+    ///
+    /// This prevents a high-contrast AF region (feathers) from inflating the rating
+    /// relative to a photo where the AF point landed on a low-contrast region (dark
+    /// eye, smooth background), and also prevents an unconfirmed selected-only point
+    /// from influencing the result at all.
     private static func scoreAFOnSubject(cgImage: CGImage,
                                           afRect: CGRect,
+                                          afConfirmed: Bool = false,
                                           subjectBody: CGRect,
                                           subject: SubjectResult,
                                           afOnEye: Bool?,
@@ -339,28 +358,47 @@ struct FocusAnalyzer {
         let scoringArea = Double(afRect.width * afRect.height)
 
         // Normalise both scores for threshold comparison and display.
-        // NOTE: We compare afNorm vs bodyNorm directly (not against threshold) to decide
-        // which region is sharper — this avoids the crop-size bias where a large body crop
-        // produces higher absolute Laplacian variance than a tiny AF crop even when the AF
-        // region is objectively sharper pixel-for-pixel.
         let afNorm   = min(afRaw   / afThresh.normalisationDivisor,   1.0)
         let bodyNorm = min(bodyRaw / bodyThresh.normalisationDivisor,  1.0)
         let bodyFinalWithConf = bodyNorm * bodySizeConf
 
-        // Decide which score to use
+        // Decide which score to use.
+        //
+        // The body score is the default in all cases. The AF score can only win if:
+        //   (a) afConfirmed — camera reported isInFocus = true at this point
+        //   (b) afClearlyBetter — AF score beats body by at least afBoostMargin,
+        //       meaning the AF region has genuinely more fine detail than the body
+        //       crop (rules out noise and minor fluctuations)
+        //   (c) bodyIsNearSharp — body score is already within borderlineMargin of
+        //       the sharp threshold, so the AF score is confirming a near-sharp photo
+        //       rather than overriding a poor one
+        //
+        // Without (a): an unconfirmed selected-only point is not reliable enough.
+        // Without (b): AF on feathers vs AF on eye would produce different results
+        //              for the same photo — the exact inconsistency we are fixing.
+        // Without (c): a high AF score on a blurry body would inflate the rating.
+        let afBoostMargin    = 0.15   // AF must beat body by at least this (tune if needed)
+        let borderlineMargin = 0.20   // body must be within this of sharp threshold
+
+        let bodyIsNearSharp = bodyNorm >= (bodyThresh.sharp - borderlineMargin)
+        let afClearlyBetter = afNorm   >= (bodyNorm + afBoostMargin)
+
         let basis: FocusResult.RatingBasis
         let useRaw:   Double
         let useFinal: Double
         let useThresh = bodyThresh
 
-        if afNorm >= bodyNorm {
-            // AF point is at least as sharp as the subject body — use it
+        if afConfirmed && afClearlyBetter && bodyIsNearSharp {
+            // Camera confirmed lock, AF region is substantially sharper, and body is
+            // already near-sharp. Use AF score as the final rating.
             basis    = .afPoint
             useRaw   = afNorm
             useFinal = afNorm   // no size penalty for AF point (see comment above)
         } else {
-            // Subject body is sharper than AF point — AF focus was degraded
-            basis    = .afPointDegraded
+            // All other cases — use body score as the consistent ground truth.
+            // ratingBasis distinguishes whether the AF score was simply not higher
+            // (subjectBody) or was actively lower than the body (afPointDegraded).
+            basis    = afNorm >= bodyNorm ? .subjectBody : .afPointDegraded
             useRaw   = bodyNorm
             useFinal = bodyFinalWithConf
         }
@@ -1167,11 +1205,15 @@ struct FocusAnalyzer {
 
     private static func extractAFRegion(from url: URL,
                                         imageWidth: Int,
-                                        imageHeight: Int) -> CGRect? {
+                                        imageHeight: Int) -> (rect: CGRect, confirmed: Bool)? {
         guard let points = CanonMakernoteParser.extractAFPoints(from: url),
               !points.isEmpty else { return nil }
 
         let focused = points.filter { $0.isInFocus }
+        // confirmed = true means the camera's phase-detect system reported a locked
+        // point (isInFocus). false means we only have a selected-but-not-locked point,
+        // which is less reliable as a sharpness signal.
+        let afConfirmed = !focused.isEmpty
         let target  = focused.isEmpty ? points : focused
 
         // The display overlay enforces a square by using normW * scaledW for both
@@ -1189,7 +1231,8 @@ struct FocusAnalyzer {
                           height: normSide)
         }
 
-        return corrected.reduce(CGRect.null) { $0.union($1) }
+        let rect = corrected.reduce(CGRect.null) { $0.union($1) }
+        return (rect: rect, confirmed: afConfirmed)
     }
     
     // MARK: - Geometry helpers

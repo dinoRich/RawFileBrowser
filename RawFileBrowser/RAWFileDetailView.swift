@@ -543,7 +543,7 @@ struct RAWFileDetailView: View {
                 }
             }
             .buttonStyle(.plain)
-            if file.focusStatus != .unanalyzed {
+            if file.focusStatus != .unanalyzed || file.detectedAnimalLabel != nil {
                 VStack(spacing: 5) {
                     if let label = settings.visibleSpeciesLabel(label: file.detectedAnimalLabel, confidence: file.detectionConfidence) {
                         HStack(spacing: 4) {
@@ -598,19 +598,7 @@ struct RAWFileDetailView: View {
                         .font(.caption)
                     }
 
-                    // AF-on-eye indicator — shown whenever an eye was detected,
-                    // regardless of overall sharpness result
-                    if let afOnEye = file.afOnEye {
-                        HStack(spacing: 4) {
-                            Image(systemName: afOnEye
-                                  ? "eye.circle.fill"
-                                  : "eye.trianglebadge.exclamationmark")
-                                .foregroundStyle(afOnEye ? .green : .orange)
-                            Text(afOnEye ? "AF on eye" : "AF missed eye")
-                                .foregroundStyle(afOnEye ? .green : .orange)
-                        }
-                        .font(.caption)
-                    }
+
                 }
             }
 

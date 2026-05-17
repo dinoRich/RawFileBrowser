@@ -10,19 +10,19 @@ struct RAWFileGridView: View {
     @State private var showResetConfirm = false
     @State private var xmpResultMessage: String? = nil
 
-    /// When non-nil, the stack detail view is shown instead of the top-level grid.
-    @State private var activeStack: BurstStack? = nil
+    /// When non-nil, the group detail view is shown (burst or similar).
+    @State private var activeGroup: PhotoGroup? = nil
 
-    /// The ID to scroll to when returning from a stack. Set just before
-    /// activeStack is cleared, then consumed by the ScrollViewReader.
+    /// When non-nil, the species detail view is shown (time sub-groups within a species).
+    @State private var activeSpeciesGroup: PhotoGroup? = nil
+
+
+    /// The ID to scroll to when returning from a group detail view.
     @State private var scrollToID: UUID? = nil
 
     // ── Selection mode ───────────────────────────────────────────────────
-    /// true = the grid is in multi-select mode
     @State private var isSelectMode: Bool = false
-    /// IDs of selected grid items (file IDs for singles, stack IDs for stacks)
     @State private var selectedItemIDs: Set<UUID> = []
-    /// Show the multi-selection label sheet when the user long-presses a selected card
     @State private var showMultiLabelSheet: Bool = false
 
     enum SortOrder: String, CaseIterable {
@@ -33,6 +33,7 @@ struct RAWFileGridView: View {
     enum FilterMode: String, CaseIterable {
         case all          = "All"
         case bursts       = "Bursts"
+        case similar      = "Similar"
         case accepted     = "Accepted"
         case rejected     = "Rejected"
         case sharp        = "Sharp"
@@ -49,18 +50,16 @@ struct RAWFileGridView: View {
         case colourGreen  = "Green"
         case colourBlue   = "Blue"
         case colourPurple = "Purple"
+        case species      = "Species"
     }
 
     // MARK: - Pill counts
 
-    private var burstStackCount: Int {
-        manager.gridItems.filter { if case .stack = $0 { return true }; return false }.count
-    }
-
     private func pillCount(for mode: FilterMode) -> Int {
         switch mode {
         case .all:          return manager.rawFiles.count
-        case .bursts:       return burstStackCount
+        case .bursts:       return manager.burstPhotoCount
+        case .similar:      return manager.similarPhotoCount
         case .accepted:     return manager.rawFiles.filter { $0.pickStatus == .accepted }.count
         case .rejected:     return manager.rawFiles.filter { $0.pickStatus == .rejected }.count
         case .sharp:        return manager.rawFiles.filter { $0.focusStatus == .sharp }.count
@@ -77,54 +76,72 @@ struct RAWFileGridView: View {
         case .colourGreen:  return manager.rawFiles.filter { $0.labelColour == .green }.count
         case .colourBlue:   return manager.rawFiles.filter { $0.labelColour == .blue }.count
         case .colourPurple: return manager.rawFiles.filter { $0.labelColour == .purple }.count
+        case .species:    return manager.speciesPhotoCount
         }
     }
 
     private var visibleFilterModes: [FilterMode] {
         FilterMode.allCases.filter { mode in
             switch mode {
-            case .all:    return true
-            case .bursts: return burstStackCount > 0
-            default:      return pillCount(for: mode) > 0
+            case .all:     return true
+            case .bursts:  return manager.burstPhotoCount > 0
+            case .similar:  return manager.similarPhotoCount > 0
+            case .species:  return manager.speciesPhotoCount > 0 || manager.isAnalyzingSpecies
+            default:        return pillCount(for: mode) > 0
             }
         }
     }
 
-    // MARK: - Top-level grid items
+    // MARK: - Filtered grid items
+    //
+    // All     → every photo as a flat single (no groups).
+    // Bursts  → burst PhotoGroups only.
+    // Similar → similar PhotoGroups only.
+    // Others  → filter individual files; groups are expanded to singles.
 
     private var filteredGridItems: [GridItem] {
         let items: [GridItem]
 
-        if filterMode == .all && searchText.isEmpty {
-            items = manager.gridItems
+        switch filterMode {
 
-        } else if filterMode == .bursts && searchText.isEmpty {
-            items = manager.gridItems.filter {
-                if case .stack = $0 { return true }
+        case .all:
+            let files = searchText.isEmpty
+                ? manager.rawFiles
+                : manager.rawFiles.filter { matchesSearch($0) }
+            items = files.map { .single($0) }
+
+        case .bursts:
+            let burstItems = manager.gridItems.filter {
+                if case .group(let g) = $0, g.isBurst { return true }
                 return false
             }
+            if searchText.isEmpty {
+                items = burstItems
+            } else {
+                items = burstItems.compactMap { item -> GridItem? in
+                    guard case .group(let g) = item else { return nil }
+                    let matching = g.files.filter { matchesSearch($0) }
+                    if matching.isEmpty { return nil }
+                    if matching.count == 1 { return .single(matching[0]) }
+                    return .group(PhotoGroup(files: matching, kind: .confirmedBurst))
+                }
+            }
 
-        } else {
+        case .similar, .species:
+            // These are rendered by separate views — return empty here.
+            items = []
+
+        default:
             items = manager.gridItems.compactMap { item -> GridItem? in
                 switch item {
                 case .single(let file):
-                    if filterMode == .bursts { return nil }
                     guard matchesFilter(file) && matchesSearch(file) else { return nil }
                     return .single(file)
-
-                case .stack(let stack):
-                    if filterMode == .bursts {
-                        if searchText.isEmpty { return item }
-                        let matching = stack.files.filter { matchesSearch($0) }
-                        if matching.isEmpty { return nil }
-                        if matching.count == 1 { return .single(matching[0]) }
-                        return .stack(BurstStack(files: matching))
-                    } else {
-                        let matching = stack.files.filter { matchesFilter($0) && matchesSearch($0) }
-                        if matching.isEmpty { return nil }
-                        if matching.count == 1 { return .single(matching[0]) }
-                        return .stack(BurstStack(files: matching))
-                    }
+                case .group(let group):
+                    let matching = group.files.filter { matchesFilter($0) && matchesSearch($0) }
+                    if matching.isEmpty { return nil }
+                    if matching.count == 1 { return .single(matching[0]) }
+                    return .group(PhotoGroup(files: matching, kind: group.kind))
                 }
             }
         }
@@ -133,23 +150,43 @@ struct RAWFileGridView: View {
             let lhs = leadingFile($0)
             let rhs = leadingFile($1)
             switch sortOrder {
-            case .name:
-                return lhs.name < rhs.name
+            case .name:      return lhs.name < rhs.name
             case .date:
-                let d0 = lhs.modificationDate ?? .distantPast
-                let d1 = rhs.modificationDate ?? .distantPast
-                return d0 > d1
-            case .size:
-                return lhs.size > rhs.size
-            case .sharpness:
-                return lhs.focusScore > rhs.focusScore
+                return (lhs.modificationDate ?? .distantPast) > (rhs.modificationDate ?? .distantPast)
+            case .size:      return lhs.size > rhs.size
+            case .sharpness: return lhs.focusScore > rhs.focusScore
+            }
+        }
+    }
+
+    // MARK: - Similar groups (filtered + sorted)
+
+    private var filteredSimilarGroups: [PhotoGroup] {
+        let groups: [PhotoGroup]
+        if searchText.isEmpty {
+            groups = manager.similarGroups
+        } else {
+            groups = manager.similarGroups.compactMap { group in
+                let matching = group.files.filter { matchesSearch($0) }
+                guard matching.count >= 2 else { return nil }
+                return PhotoGroup(files: matching, kind: .similar)
+            }
+        }
+        return groups.sorted {
+            let lhs = $0.coverFile; let rhs = $1.coverFile
+            switch sortOrder {
+            case .name:      return lhs.name < rhs.name
+            case .date:
+                return (lhs.modificationDate ?? .distantPast) > (rhs.modificationDate ?? .distantPast)
+            case .size:      return lhs.size > rhs.size
+            case .sharpness: return lhs.focusScore > rhs.focusScore
             }
         }
     }
 
     private func matchesFilter(_ file: RAWFile) -> Bool {
         switch filterMode {
-        case .all, .bursts: return true
+        case .all, .bursts, .similar, .species: return true
         case .accepted:     return file.pickStatus == .accepted
         case .rejected:     return file.pickStatus == .rejected
         case .sharp:        return file.focusStatus == .sharp
@@ -176,67 +213,68 @@ struct RAWFileGridView: View {
     private func leadingFile(_ item: GridItem) -> RAWFile {
         switch item {
         case .single(let f): return f
-        case .stack(let s):  return s.coverFile
+        case .group(let g):  return g.coverFile
         }
     }
 
     private var columns: [SwiftUI.GridItem] {
-        let isIPad = UIDevice.current.userInterfaceIdiom == .pad
-        let count  = isIPad ? 3 : 2
+        let count = UIDevice.current.userInterfaceIdiom == .pad ? 3 : 2
         return Array(repeating: SwiftUI.GridItem(.flexible(), spacing: 12), count: count)
     }
 
     // MARK: - Navigation helpers
 
-    /// Flat ordered list of every file ID in the current filtered grid,
-    /// with stacks expanded. Passed to detail view so the user can swipe
-    /// through all photos in grid order.
     private var flatFileIDs: [UUID] {
-        filteredGridItems.flatMap { item -> [UUID] in
+        if filterMode == .similar {
+            return filteredSimilarGroups.flatMap { $0.files.map { $0.id } }
+        }
+        return filteredGridItems.flatMap { item -> [UUID] in
             switch item {
             case .single(let f): return [f.id]
-            case .stack(let s):  return s.files.map { $0.id }
+            case .group(let g):  return g.files.map { $0.id }
             }
         }
     }
 
-    /// Returns the BurstStack containing `fileID`, or nil if it is a standalone single.
-    private func stackContaining(fileID: UUID) -> BurstStack? {
+    private func groupContaining(fileID: UUID) -> PhotoGroup? {
         for item in filteredGridItems {
-            if case .stack(let s) = item, s.files.contains(where: { $0.id == fileID }) {
-                return s
+            if case .group(let g) = item, g.files.contains(where: { $0.id == fileID }) {
+                return g
             }
         }
         return nil
     }
 
     // MARK: - Body
-    //
-    // Both the top-level grid and the stack detail view stay in the view
-    // hierarchy at all times. Visibility is toggled with opacity and
-    // allowsHitTesting rather than swapping views in/out.
-    //
-    // This is the key fix for scroll position restoration: LazyVGrid is
-    // never torn down, so its items always exist when scrollTo is called.
 
     var body: some View {
         ZStack {
-            // ── Top-level grid (always in hierarchy) ──────────────────
             topLevelGrid
-                .opacity(activeStack == nil ? 1 : 0)
-                .allowsHitTesting(activeStack == nil)
+                .opacity(activeGroup == nil && activeSpeciesGroup == nil ? 1 : 0)
+                .allowsHitTesting(activeGroup == nil && activeSpeciesGroup == nil)
 
-            // ── Stack detail view (only constructed when needed) ──────
-            if let stack = activeStack {
-                BurstDetailGridView(
-                    stack: stack,
+            if let speciesGroup = activeSpeciesGroup {
+                SpeciesDetailView(
+                    speciesGroup: speciesGroup,
                     manager: manager,
-                    activeStack: $activeStack,
                     onDismiss: {
-                        scrollToID = stack.id
+                        scrollToID = speciesGroup.id
+                        activeSpeciesGroup = nil
                     }
                 )
-                .transition(.identity)  // no animation — instant swap
+                .transition(.identity)
+            }
+
+            if let group = activeGroup {
+                GroupDetailView(
+                    group: group,
+                    manager: manager,
+                    onDismiss: {
+                        scrollToID = group.id
+                        activeGroup = nil
+                    }
+                )
+                .transition(.identity)
             }
         }
     }
@@ -245,22 +283,17 @@ struct RAWFileGridView: View {
 
     private var topLevelGrid: some View {
         VStack(spacing: 0) {
-            if manager.isAnalyzing {
-                analysisBanner
-            }
+            if manager.isAnalyzing        { analysisBanner }
+            if manager.isComputingHashes  { hashBanner }
+            if manager.isAnalyzingSpecies { speciesBanner }
 
-            // ── Selection mode count bar ─────────────────────────────────
             if isSelectMode {
                 HStack {
-                    Text(selectedItemIDs.isEmpty
-                         ? "Tap photos to select"
-                         : "\(selectedItemIDs.count) selected")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
+                    Text(selectedItemIDs.isEmpty ? "Tap photos to select" : "\(selectedItemIDs.count) selected")
+                        .font(.subheadline).foregroundStyle(.secondary)
                     Spacer()
                 }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 8)
+                .padding(.horizontal, 16).padding(.vertical, 8)
                 .background(Color(.secondarySystemBackground))
                 Divider()
             }
@@ -271,39 +304,36 @@ struct RAWFileGridView: View {
                         FilterPill(
                             mode: mode,
                             count: pillCount(for: mode),
-                            isSelected: filterMode == mode
-                        ) {
-                            filterMode = mode
-                        }
+                            isSelected: filterMode == mode,
+                            label: mode == .species
+                                ? "Species \(manager.speciesGroups.count) (\(manager.speciesPhotoCount))"
+                                : nil
+                        ) { filterMode = mode }
                     }
                 }
-                .padding(.horizontal)
-                .padding(.vertical, 8)
+                .padding(.horizontal).padding(.vertical, 8)
             }
 
             Divider()
 
-            if filteredGridItems.isEmpty {
+            if filterMode == .similar {
+                similarContent
+            } else if filterMode == .species {
+                speciesContent
+            } else if filteredGridItems.isEmpty {
                 emptyState
             } else {
                 ScrollViewReader { proxy in
                     ScrollView {
                         LazyVGrid(columns: columns, spacing: 12) {
-                            ForEach(filteredGridItems) { item in
-                                gridCell(for: item)
-                            }
+                            ForEach(filteredGridItems) { item in gridCell(for: item) }
                         }
                         .padding()
                     }
                     .background(Color(.systemGray6))
-                    // Fires when scrollToID is set after returning from a stack.
-                    // Because LazyVGrid is never torn down, its items already
-                    // exist and scrollTo finds them immediately.
                     .onChange(of: scrollToID) { targetID in
                         guard let id = targetID else { return }
-                        withAnimation {
-                            proxy.scrollTo(id, anchor: .center)
-                        }
+                        withAnimation { proxy.scrollTo(id, anchor: .center) }
                         scrollToID = nil
                     }
                 }
@@ -316,60 +346,45 @@ struct RAWFileGridView: View {
             }
             ToolbarItemGroup(placement: .navigationBarTrailing) {
 
-                // 1 ── Analyze Focus / Cancel
                 if !isSelectMode {
                     Button {
-                        if manager.isAnalyzing {
-                            manager.cancelAnalysis()
-                        } else {
-                            showAnalysisConfirm = true
-                        }
+                        if manager.isAnalyzing { manager.cancelAnalysis() }
+                        else { showAnalysisConfirm = true }
                     } label: {
-                        Label(
-                            manager.isAnalyzing ? "Cancel Analysis" : "Analyze Focus",
-                            systemImage: manager.isAnalyzing ? "xmark.circle" : "circle.dashed"
-                        )
+                        Label(manager.isAnalyzing ? "Cancel Analysis" : "Analyze Focus",
+                              systemImage: manager.isAnalyzing ? "xmark.circle" : "circle.dashed")
                     }
                 }
 
-                // 2 ── Reset flags / stars / colours ─────────────────────
                 if !isSelectMode {
                     Button {
-                        showResetConfirm = true
+                        Task { await manager.computeSimilarGroups() }
                     } label: {
+                        Label("Find Similar", systemImage: "square.on.square.dashed")
+                    }
+                    .disabled(manager.isComputingHashes || manager.rawFiles.isEmpty)
+                }
+
+                if !isSelectMode {
+                    Button { showResetConfirm = true } label: {
                         Label("Reset All Labels", systemImage: "arrow.counterclockwise.circle")
                     }
                 }
 
-                // 3 ── Select All / Deselect All (only visible in select mode) ──
                 if isSelectMode {
                     let allIDs = Set(filteredGridItems.map { $0.id })
-                    let allSelected = allIDs == selectedItemIDs
                     Button {
-                        if allSelected {
-                            selectedItemIDs = []
-                        } else {
-                            selectedItemIDs = allIDs
-                        }
-                    } label: {
-                        Text("All")
-                    }
+                        selectedItemIDs = allIDs == selectedItemIDs ? [] : allIDs
+                    } label: { Text("All") }
                 }
 
-                // 3b ── Enter / Exit select mode ─────────────────────────────────
                 Button {
-                    if isSelectMode {
-                        isSelectMode = false
-                        selectedItemIDs = []
-                    } else {
-                        isSelectMode = true
-                    }
+                    if isSelectMode { isSelectMode = false; selectedItemIDs = [] }
+                    else { isSelectMode = true }
                 } label: {
-                    Text(isSelectMode ? "Done" : "Select")
-                        .font(.body)
+                    Text(isSelectMode ? "Done" : "Select").font(.body)
                 }
 
-                // 4 ── Save XMP (floppy disk) ─────────────────────────────
                 if !isSelectMode {
                     Button {
                         let msg = manager.writeXMPBatch()
@@ -384,38 +399,29 @@ struct RAWFileGridView: View {
             let ids = flatFileIDs
             let idx = ids.firstIndex(of: file.id) ?? 0
             RAWFileDetailView(
-                fileIDs:    ids,
-                startIndex: idx,
-                manager:    manager,
+                fileIDs: ids, startIndex: idx, manager: manager,
                 onDismiss: { lastViewedID in
-                    if let stack = stackContaining(fileID: lastViewedID) {
-                        activeStack = stack
-                        scrollToID  = stack.id
+                    if let g = groupContaining(fileID: lastViewedID) {
+                        activeGroup = g
+                        scrollToID  = g.id
                     } else {
                         scrollToID = lastViewedID
                     }
                 }
             )
         }
-        // Multi-selection label sheet — shown when user long-presses any selected card
         .sheet(isPresented: $showMultiLabelSheet) {
             let liveSelected: [RAWFile] = {
                 let ids = selectedItemIDs
-                // Collect the actual RAWFile objects for every selected item.
-                // For stacks, include all files in the stack.
                 var files: [RAWFile] = []
                 for item in filteredGridItems {
                     guard ids.contains(item.id) else { continue }
                     switch item {
                     case .single(let f):
-                        if let live = manager.rawFiles.first(where: { $0.id == f.id }) {
-                            files.append(live)
-                        }
-                    case .stack(let s):
-                        for f in s.files {
-                            if let live = manager.rawFiles.first(where: { $0.id == f.id }) {
-                                files.append(live)
-                            }
+                        if let live = manager.rawFiles.first(where: { $0.id == f.id }) { files.append(live) }
+                    case .group(let g):
+                        for f in g.files {
+                            if let live = manager.rawFiles.first(where: { $0.id == f.id }) { files.append(live) }
                         }
                     }
                 }
@@ -430,32 +436,114 @@ struct RAWFileGridView: View {
             set: { if !$0 { xmpResultMessage = nil } }
         )) {
             Button("OK") { xmpResultMessage = nil }
-        } message: {
-            Text(xmpResultMessage ?? "")
-        }
-        .confirmationDialog(
-            "Analyze \(manager.rawFiles.count) files for sharpness?",
-            isPresented: $showAnalysisConfirm,
-            titleVisibility: .visible
-        ) {
-            Button("Analyze All") {
-                Task { await manager.analyzeAllFocus() }
-            }
+        } message: { Text(xmpResultMessage ?? "") }
+        .confirmationDialog("Analyze \(manager.rawFiles.count) files for sharpness?",
+                            isPresented: $showAnalysisConfirm, titleVisibility: .visible) {
+            Button("Analyze All") { Task { await manager.analyzeAllFocus() } }
             Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("This may take a moment depending on file count.")
-        }
-        .confirmationDialog(
-            "Reset all flags, stars and colours?",
-            isPresented: $showResetConfirm,
-            titleVisibility: .visible
-        ) {
-            Button("Reset All", role: .destructive) {
-                manager.resetAllLabels()
-            }
+        } message: { Text("This may take a moment depending on file count.") }
+        .confirmationDialog("Reset all flags, stars and colours?",
+                            isPresented: $showResetConfirm, titleVisibility: .visible) {
+            Button("Reset All", role: .destructive) { manager.resetAllLabels() }
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("This will clear every flag, star rating and colour label on all \(manager.rawFiles.count) photos. This cannot be undone.")
+        }
+    }
+
+    // MARK: - Similar content
+
+    @ViewBuilder
+    private var similarContent: some View {
+        if manager.isAnalyzingSpecies {
+            Spacer()
+        } else if filteredSimilarGroups.isEmpty {
+            VStack(spacing: 16) {
+                Image(systemName: "square.on.square.dashed")
+                    .font(.system(size: 60)).foregroundStyle(.secondary)
+                Text("No similar photos found")
+                    .font(.title2.weight(.semibold))
+                Text("Similar photos are detected automatically at load time using visual fingerprinting.")
+                    .foregroundStyle(.secondary).multilineTextAlignment(.center)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity).padding()
+        } else {
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVGrid(columns: columns, spacing: 12) {
+                        ForEach(filteredSimilarGroups) { group in
+                            BurstStackCard(
+                                stack: group,
+                                manager: manager,
+                                visibleCount: group.count
+                            )
+                            .onTapGesture { activeGroup = group }
+                            .id(group.id)
+                        }
+                    }
+                    .padding()
+                }
+                .background(Color(.systemGray6))
+                .onChange(of: scrollToID) { targetID in
+                    guard let id = targetID else { return }
+                    withAnimation { proxy.scrollTo(id, anchor: .center) }
+                    scrollToID = nil
+                }
+            }
+        }
+    }
+
+    // MARK: - Species content view
+
+    @ViewBuilder
+    private var speciesContent: some View {
+        if manager.isAnalyzingSpecies && manager.speciesGroups.isEmpty {
+            VStack(spacing: 16) {
+                ProgressView()
+                Text("Identifying species…")
+                    .font(.title2.weight(.semibold))
+                Text("Groups will appear as photos are identified.")
+                    .foregroundStyle(.secondary).multilineTextAlignment(.center)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity).padding()
+        } else if manager.speciesGroups.isEmpty {
+            VStack(spacing: 16) {
+                Image(systemName: "pawprint")
+                    .font(.system(size: 60)).foregroundStyle(.secondary)
+                Text("No species identified yet")
+                    .font(.title2.weight(.semibold))
+                Text("Species are identified automatically after photos load.")
+                    .foregroundStyle(.secondary).multilineTextAlignment(.center)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity).padding()
+        } else {
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVGrid(columns: columns, spacing: 12) {
+                        ForEach(filteredSpeciesGroups) { group in
+                            SpeciesGroupCard(group: group, manager: manager)
+                                .onTapGesture { activeSpeciesGroup = group }
+                                .id(group.id)
+                        }
+                    }
+                    .padding()
+                }
+                .background(Color(.systemGray6))
+                .onChange(of: scrollToID) { targetID in
+                    guard let id = targetID else { return }
+                    withAnimation { proxy.scrollTo(id, anchor: .center) }
+                    scrollToID = nil
+                }
+            }
+        }
+    }
+
+    private var filteredSpeciesGroups: [PhotoGroup] {
+        guard !searchText.isEmpty else { return manager.speciesGroups }
+        return manager.speciesGroups.compactMap { group in
+            let matching = group.files.filter { matchesSearch($0) }
+            guard matching.count >= 2 else { return nil }
+            return PhotoGroup(files: matching, kind: .similar)
         }
     }
 
@@ -466,71 +554,53 @@ struct RAWFileGridView: View {
         switch item {
         case .single(let file):
             RAWFileThumbnailCard(
-                file: file,
-                manager: manager,
+                file: file, manager: manager,
                 isSelectMode: isSelectMode,
                 isSelected: selectedItemIDs.contains(file.id),
                 onToggleSelect: { toggleSelection(of: item) }
             )
             .onTapGesture {
-                if isSelectMode {
-                    toggleSelection(of: item)
-                } else {
-                    selectedFile = file
-                }
+                if isSelectMode { toggleSelection(of: item) }
+                else { selectedFile = file }
             }
             .onLongPressGesture {
                 if isSelectMode {
-                    // If this card isn't already selected, select it too
-                    if !selectedItemIDs.contains(file.id) {
-                        selectedItemIDs.insert(file.id)
-                    }
+                    selectedItemIDs.insert(file.id)
                     showMultiLabelSheet = true
                 }
-                // (If NOT in select mode, the card itself handles the long-press)
             }
             .id("\(file.id)-\(file.focusStatus.rawValue)-\(file.pickStatus.rawValue)")
 
-        case .stack(let stack):
+        case .group(let group):
             BurstStackCard(
-                stack: stack,
-                manager: manager,
-                visibleCount: stack.files.count,
+                stack: group, manager: manager,
+                visibleCount: group.files.count,
                 isSelectMode: isSelectMode,
-                isSelected: selectedItemIDs.contains(stack.id),
+                isSelected: selectedItemIDs.contains(group.id),
                 onToggleSelect: { toggleSelection(of: item) }
             )
             .onTapGesture {
-                if isSelectMode {
-                    toggleSelection(of: item)
-                } else {
-                    activeStack = stack
-                }
+                if isSelectMode { toggleSelection(of: item) }
+                else { activeGroup = group }
             }
             .onLongPressGesture {
                 if isSelectMode {
-                    if !selectedItemIDs.contains(stack.id) {
-                        selectedItemIDs.insert(stack.id)
-                    }
+                    selectedItemIDs.insert(group.id)
                     showMultiLabelSheet = true
                 }
-                // (If NOT in select mode, the card itself handles the long-press)
             }
-            .id(stack.id)
+            .id(group.id)
         }
     }
 
     // MARK: - Selection helpers
 
     private func toggleSelection(of item: GridItem) {
-        if selectedItemIDs.contains(item.id) {
-            selectedItemIDs.remove(item.id)
-        } else {
-            selectedItemIDs.insert(item.id)
-        }
+        if selectedItemIDs.contains(item.id) { selectedItemIDs.remove(item.id) }
+        else { selectedItemIDs.insert(item.id) }
     }
 
-    // MARK: - Subviews
+    // MARK: - Banners
 
     private var analysisBanner: some View {
         VStack(spacing: 6) {
@@ -538,33 +608,47 @@ struct RAWFileGridView: View {
                 Image(systemName: "circle.dashed")
                 Text("Analyzing focus…")
                 Spacer()
-                Text("\(Int(manager.analysisProgress * 100))%")
-                    .monospacedDigit()
-                Button {
-                    manager.cancelAnalysis()
-                } label: {
-                    Text("Cancel")
-                        .font(.subheadline.weight(.medium))
-                        .foregroundStyle(.red)
+                Text("\(Int(manager.analysisProgress * 100))%").monospacedDigit()
+                Button { manager.cancelAnalysis() } label: {
+                    Text("Cancel").font(.subheadline.weight(.medium)).foregroundStyle(.red)
                 }
-                .buttonStyle(.plain)
-                .padding(.leading, 8)
+                .buttonStyle(.plain).padding(.leading, 8)
             }
             .font(.subheadline.weight(.medium))
-
-            ProgressView(value: manager.analysisProgress)
-                .tint(.accentColor)
+            ProgressView(value: manager.analysisProgress).tint(.accentColor)
         }
-        .padding(.horizontal)
-        .padding(.vertical, 10)
+        .padding(.horizontal).padding(.vertical, 10)
+        .background(Color(.secondarySystemBackground))
+    }
+
+    private var speciesBanner: some View {
+        HStack {
+            ProgressView().padding(.trailing, 4)
+            Text("Identifying species…").font(.subheadline.weight(.medium))
+            Spacer()
+            Text("\(Int(manager.speciesProgress * 100))%")
+                .font(.subheadline.monospacedDigit()).foregroundStyle(.secondary)
+        }
+        .padding(.horizontal).padding(.vertical, 10)
+        .background(Color(.secondarySystemBackground))
+    }
+
+    private var hashBanner: some View {
+        HStack {
+            ProgressView().padding(.trailing, 4)
+            Text("Scanning for similar photos…").font(.subheadline.weight(.medium))
+            Spacer()
+            Text("\(Int(manager.hashProgress * 100))%")
+                .font(.subheadline.monospacedDigit()).foregroundStyle(.secondary)
+        }
+        .padding(.horizontal).padding(.vertical, 10)
         .background(Color(.secondarySystemBackground))
     }
 
     private var emptyState: some View {
         VStack(spacing: 16) {
             Image(systemName: filterMode == .rejected ? "flag.fill" : "photo.on.rectangle.angled")
-                .font(.system(size: 60))
-                .foregroundStyle(.secondary)
+                .font(.system(size: 60)).foregroundStyle(.secondary)
             Text(filterMode == .rejected   ? "No rejected files"
                  : filterMode == .accepted ? "No accepted files"
                  : filterMode == .bursts   ? "No bursts found"
@@ -572,16 +656,370 @@ struct RAWFileGridView: View {
                 .font(.title2.weight(.semibold))
             Text(filterMode == .rejected
                  ? "No photos have been rejected yet."
-                 : filterMode == .accepted
-                 ? "No photos have been accepted yet."
-                 : filterMode == .bursts
-                 ? "No burst sequences were detected in this folder."
+                 : filterMode == .accepted ? "No photos have been accepted yet."
+                 : filterMode == .bursts   ? "No burst sequences were detected."
                  : "Try adjusting your search or filter.")
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
+                .foregroundStyle(.secondary).multilineTextAlignment(.center)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .padding()
+        .frame(maxWidth: .infinity, maxHeight: .infinity).padding()
+    }
+}
+
+// MARK: - GroupDetailView
+//
+// Shows all photos in a PhotoGroup (burst or similar) as a flat grid.
+// Used for both burst and similar groups — the back button label reflects the kind.
+
+struct GroupDetailView: View {
+    let group: PhotoGroup
+    @ObservedObject var manager: SDCardManager
+    let onDismiss: () -> Void
+    /// Overrides the default back breadcrumb label (e.g. "Robin" when navigating from a species sub-group)
+    var backLabelOverride: String? = nil
+    /// Overrides the default title caption
+    var titleOverride: String? = nil
+
+    @State private var selectedFile: RAWFile?
+    @State private var filterMode: RAWFileGridView.FilterMode = .all
+
+    private var columns: [SwiftUI.GridItem] {
+        let count = UIDevice.current.userInterfaceIdiom == .pad ? 3 : 2
+        return Array(repeating: SwiftUI.GridItem(.flexible(), spacing: 12), count: count)
+    }
+
+    private var liveFiles: [RAWFile] {
+        let ids = Set(group.files.map { $0.id })
+        let live = manager.rawFiles.filter { ids.contains($0.id) }
+        return live.isEmpty ? group.files : live
+    }
+
+    private func count(for mode: RAWFileGridView.FilterMode) -> Int {
+        switch mode {
+        case .all, .bursts, .similar, .species: return liveFiles.count
+        case .accepted:     return liveFiles.filter { $0.pickStatus == .accepted }.count
+        case .rejected:     return liveFiles.filter { $0.pickStatus == .rejected }.count
+        case .sharp:        return liveFiles.filter { $0.focusStatus == .sharp }.count
+        case .slightlyBlur: return liveFiles.filter { $0.focusStatus == .slightlyBlur }.count
+        case .blurry:       return liveFiles.filter { $0.focusStatus == .blurry }.count
+        case .unanalyzed:   return liveFiles.filter { $0.focusStatus == .unanalyzed }.count
+        case .star1:        return liveFiles.filter { $0.starRating == 1 }.count
+        case .star2:        return liveFiles.filter { $0.starRating == 2 }.count
+        case .star3:        return liveFiles.filter { $0.starRating == 3 }.count
+        case .star4:        return liveFiles.filter { $0.starRating == 4 }.count
+        case .star5:        return liveFiles.filter { $0.starRating == 5 }.count
+        case .colourRed:    return liveFiles.filter { $0.labelColour == .red }.count
+        case .colourYellow: return liveFiles.filter { $0.labelColour == .yellow }.count
+        case .colourGreen:  return liveFiles.filter { $0.labelColour == .green }.count
+        case .colourBlue:   return liveFiles.filter { $0.labelColour == .blue }.count
+        case .colourPurple: return liveFiles.filter { $0.labelColour == .purple }.count
+        }
+    }
+
+    private var filteredFiles: [RAWFile] {
+        switch filterMode {
+        case .all, .bursts, .similar, .species: return liveFiles
+        case .accepted:     return liveFiles.filter { $0.pickStatus == .accepted }
+        case .rejected:     return liveFiles.filter { $0.pickStatus == .rejected }
+        case .sharp:        return liveFiles.filter { $0.focusStatus == .sharp }
+        case .slightlyBlur: return liveFiles.filter { $0.focusStatus == .slightlyBlur }
+        case .blurry:       return liveFiles.filter { $0.focusStatus == .blurry }
+        case .unanalyzed:   return liveFiles.filter { $0.focusStatus == .unanalyzed }
+        case .star1:        return liveFiles.filter { $0.starRating == 1 }
+        case .star2:        return liveFiles.filter { $0.starRating == 2 }
+        case .star3:        return liveFiles.filter { $0.starRating == 3 }
+        case .star4:        return liveFiles.filter { $0.starRating == 4 }
+        case .star5:        return liveFiles.filter { $0.starRating == 5 }
+        case .colourRed:    return liveFiles.filter { $0.labelColour == .red }
+        case .colourYellow: return liveFiles.filter { $0.labelColour == .yellow }
+        case .colourGreen:  return liveFiles.filter { $0.labelColour == .green }
+        case .colourBlue:   return liveFiles.filter { $0.labelColour == .blue }
+        case .colourPurple: return liveFiles.filter { $0.labelColour == .purple }
+        }
+    }
+
+    private var visibleFilterModes: [RAWFileGridView.FilterMode] {
+        RAWFileGridView.FilterMode.allCases.filter { mode in
+            if mode == .bursts || mode == .similar || mode == .species { return false }
+            return mode == .all || count(for: mode) > 0
+        }
+    }
+
+    private var backLabel: String {
+        backLabelOverride ?? (group.isBurst ? "Bursts" : "Similar")
+    }
+
+    private var titleLabel: String {
+        if let t = titleOverride { return t }
+        return group.isBurst
+            ? "Burst (\(group.count) photos)"
+            : "Similar (\(group.count) photos)"
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // ── Header ──────────────────────────────────────────────────
+            HStack {
+                Button {
+                    onDismiss()
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "chevron.left")
+                            .font(.system(size: 16, weight: .semibold))
+                        Text(backLabel)
+                    }
+                    .foregroundStyle(Color.accentColor)
+                }
+                Spacer()
+                Text(titleLabel)
+                    .font(.subheadline).foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 16).padding(.vertical, 12)
+            .background(Color(.systemBackground))
+
+            Divider()
+
+            // ── Filter pills ─────────────────────────────────────────────
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    ForEach(visibleFilterModes, id: \.self) { mode in
+                        FilterPill(mode: mode, count: count(for: mode),
+                                   isSelected: filterMode == mode) { filterMode = mode }
+                    }
+                }
+                .padding(.horizontal).padding(.vertical, 8)
+            }
+
+            Divider()
+
+            if filteredFiles.isEmpty {
+                VStack(spacing: 16) {
+                    Image(systemName: "photo.on.rectangle.angled")
+                        .font(.system(size: 60)).foregroundStyle(.secondary)
+                    Text("No photos match").font(.title2.weight(.semibold))
+                    Text("Try a different filter.").foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity).padding()
+            } else {
+                ScrollView {
+                    LazyVGrid(columns: columns, spacing: 12) {
+                        ForEach(filteredFiles) { file in
+                            RAWFileThumbnailCard(file: file, manager: manager)
+                                .onTapGesture { selectedFile = file }
+                                .id(file.id)
+                        }
+                    }
+                    .padding()
+                }
+                .background(Color(.systemGray6))
+            }
+        }
+        .sheet(item: $selectedFile) { file in
+            let ids = filteredFiles.map { $0.id }
+            let idx = ids.firstIndex(of: file.id) ?? 0
+            RAWFileDetailView(fileIDs: ids, startIndex: idx, manager: manager,
+                              onDismiss: { _ in })
+        }
+    }
+}
+
+// MARK: - Species detail view
+//
+// Level 2 of the species navigation hierarchy.
+// Shows all photos for one species as a mixed grid of singles and burst stacks —
+// exactly mirroring the "All" view logic but scoped to this species' files.
+// Tapping a single opens the detail sheet.
+// Tapping a burst stack opens SpeciesBurstDetailView (level 3).
+
+private let burstGap: TimeInterval = 2.0   // seconds — matches SDCardManager burstGapThreshold
+
+struct SpeciesDetailView: View {
+    let speciesGroup: PhotoGroup
+    @ObservedObject var manager: SDCardManager
+    let onDismiss: () -> Void
+
+    @State private var activeBurst: PhotoGroup? = nil
+    @State private var selectedFile: RAWFile?
+
+    // MARK: - Species name
+
+    var speciesName: String { Self.dominantSpecies(in: speciesGroup) }
+
+    static func dominantSpecies(in group: PhotoGroup) -> String {
+        var counts: [String: Int] = [:]
+        for file in group.files {
+            // Use speciesLabel first; fall back to detectedAnimalLabel so that
+            // files labelled below the confidence threshold still contribute a vote.
+            let label = file.speciesLabel ?? file.detectedAnimalLabel
+            if let label { counts[label, default: 0] += 1 }
+        }
+        return counts.max(by: { $0.value < $1.value })?.key ?? "Unknown"
+    }
+
+    // MARK: - Grid items
+    //
+    // Group species files into bursts and singles using the 2-second rule.
+    // Walk through files in date order. Consecutive files within 2 seconds
+    // form a burst group. A group becomes a stack only if it has 2+ files
+    // AND contains at least one file with a confident species label
+    // (prevents unlabelled-only groups from showing as fake bursts).
+    // Groups of 1, or groups with no labelled file, show as singles.
+
+    private var gridItems: [GridItem] {
+        let sorted = speciesGroup.files.sorted {
+            ($0.modificationDate ?? .distantFuture) < ($1.modificationDate ?? .distantFuture)
+        }
+        guard !sorted.isEmpty else { return [] }
+
+        // Step 1: group consecutive files within burstGap into raw groups.
+        var rawGroups: [[RAWFile]] = []
+        var current: [RAWFile] = [sorted[0]]
+
+        for i in 1..<sorted.count {
+            guard let d0 = sorted[i-1].modificationDate,
+                  let d1 = sorted[i].modificationDate else {
+                rawGroups.append(current); current = [sorted[i]]; continue
+            }
+            if d1.timeIntervalSince(d0) <= burstGap {
+                current.append(sorted[i])
+            } else {
+                rawGroups.append(current); current = [sorted[i]]
+            }
+        }
+        rawGroups.append(current)
+
+        // Step 2: convert each raw group to a GridItem.
+        // A group becomes a burst stack only if it has ≥2 files AND
+        // at least one member has a confident species label.
+        return rawGroups.map { group -> GridItem in
+            let hasLabel = group.contains { $0.speciesLabel != nil }
+            if group.count >= 2 && hasLabel {
+                return .group(PhotoGroup(files: group, kind: .confirmedBurst))
+            } else if group.count == 1 {
+                return .single(group[0])
+            } else {
+                // Multiple unlabelled files — emit as individual singles.
+                // (Should rarely happen given how buildSpeciesGroups works.)
+                // Return the first as representative; others will be skipped
+                // since we walk sorted order and they'd be emitted separately.
+                // Actually map returns one item per rawGroup, so just take first.
+                return .single(group[0])
+            }
+        }
+        // Note: the "multiple unlabelled" case emits only group[0] as a single.
+        // The remaining files in such a group would be lost. This is acceptable
+        // because buildSpeciesGroups only adds files that are burst-adjacent to
+        // a labelled file, so any group of 2+ should always contain a label.
+    }
+
+    private var columns: [SwiftUI.GridItem] {
+        let count = UIDevice.current.userInterfaceIdiom == .pad ? 3 : 2
+        return Array(repeating: SwiftUI.GridItem(.flexible(), spacing: 12), count: count)
+    }
+
+    // MARK: - Body
+
+    var body: some View {
+        Group {
+            if let burst = activeBurst {
+                // ── Level 3: burst detail ─────────────────────────────────
+                GroupDetailView(
+                    group: burst,
+                    manager: manager,
+                    onDismiss: { activeBurst = nil },
+                    backLabelOverride: speciesName
+                )
+            } else {
+                // ── Level 2: species grid (singles + burst stacks) ────────
+                VStack(spacing: 0) {
+                    HStack {
+                        Button { onDismiss() } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: "chevron.left")
+                                    .font(.system(size: 16, weight: .semibold))
+                                Text("Species")
+                            }
+                            .foregroundStyle(Color.accentColor)
+                        }
+                        Spacer()
+                        Text("\(speciesName) · \(speciesGroup.count) photos")
+                            .font(.subheadline).foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                    .padding(.horizontal, 16).padding(.vertical, 12)
+                    .background(Color(.systemBackground))
+
+                    Divider()
+
+                    if gridItems.isEmpty {
+                        VStack(spacing: 16) {
+                            Image(systemName: "photo.on.rectangle.angled")
+                                .font(.system(size: 60)).foregroundStyle(.secondary)
+                            Text("No photos").font(.title2.weight(.semibold))
+                        }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    } else {
+                        ScrollView {
+                            LazyVGrid(columns: columns, spacing: 12) {
+                                ForEach(gridItems) { item in
+                                    switch item {
+                                    case .single(let file):
+                                        RAWFileThumbnailCard(
+                                            file: file, manager: manager,
+                                            isSelectMode: false, isSelected: false,
+                                            onToggleSelect: {}
+                                        )
+                                        .onTapGesture { selectedFile = file }
+                                        .id(file.id)
+
+                                    case .group(let burst):
+                                        BurstStackCard(
+                                            stack: burst, manager: manager,
+                                            visibleCount: burst.count
+                                        )
+                                        .onTapGesture { activeBurst = burst }
+                                        .id(burst.id)
+                                    }
+                                }
+                            }
+                            .padding()
+                        }
+                        .background(Color(.systemGray6))
+                    }
+                }
+            }
+        }
+        .sheet(item: $selectedFile) { file in
+            let allSingleIDs = gridItems.compactMap { item -> UUID? in
+                if case .single(let f) = item { return f.id }
+                return nil
+            }
+            let idx = allSingleIDs.firstIndex(of: file.id) ?? 0
+            RAWFileDetailView(
+                fileIDs: allSingleIDs, startIndex: idx,
+                manager: manager, onDismiss: { _ in }
+            )
+        }
+    }
+}
+
+// MARK: - Species group card
+//
+// Shows a species group as a stacked-thumbnail card with the species name
+// as a label overlay. Reuses BurstStackCard for the thumbnail stack visual.
+
+struct SpeciesGroupCard: View {
+    let group: PhotoGroup
+    @ObservedObject var manager: SDCardManager
+
+    var speciesName: String { SpeciesDetailView.dominantSpecies(in: group) }
+
+    var body: some View {
+        BurstStackCard(
+            stack: group,
+            manager: manager,
+            visibleCount: group.count,
+            titleOverride: speciesName
+        )
     }
 }
 
@@ -591,14 +1029,14 @@ struct FilterPill: View {
     let mode: RAWFileGridView.FilterMode
     let count: Int
     let isSelected: Bool
+    var label: String? = nil   // overrides default "Mode N" format when set
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
-            Text("\(mode.rawValue) \(count)")
+            Text(label ?? "\(mode.rawValue) \(count)")
                 .font(.subheadline.weight(isSelected ? .semibold : .regular))
-                .padding(.horizontal, 12)
-                .padding(.vertical, 6)
+                .padding(.horizontal, 12).padding(.vertical, 6)
                 .background(isSelected ? Color.accentColor : Color(.tertiarySystemBackground))
                 .foregroundStyle(isSelected ? .white : .primary)
                 .clipShape(Capsule())

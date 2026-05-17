@@ -67,7 +67,37 @@ struct SettingsView: View {
                     Text("Species ID Threshold")
                 }
 
-                // ── Section 3: Focus outcome actions ─────────────────────
+                // ── Section 3: Similar photo threshold ───────────────────────
+                Section {
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack {
+                            Text("Similarity Threshold")
+                                .font(.body)
+                            Spacer()
+                            Text("\(settings.similarityThreshold) bits")
+                                .font(.body.monospacedDigit())
+                                .foregroundStyle(.secondary)
+                        }
+
+                        Slider(
+                            value: Binding(
+                                get: { Double(settings.similarityThreshold) },
+                                set: { settings.similarityThreshold = Int($0.rounded()) }
+                            ),
+                            in: 1...20, step: 1
+                        )
+                        .tint(.accentColor)
+
+                        Text("Controls how different two photos can be and still be grouped as similar. Lower = stricter (only near-identical). Higher = looser (more photos grouped). Default is 10. Re-run Find Similar after changing this.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(.vertical, 4)
+                } header: {
+                    Text("Similar Photo Detection")
+                }
+
+                // ── Section 4: Focus outcome actions ─────────────────────
                 Section {
                     OutcomeRow(
                         label: "Sharp",

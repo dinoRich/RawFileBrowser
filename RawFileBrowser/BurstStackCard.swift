@@ -16,9 +16,11 @@ import SwiftUI
 /// bounding box as a solo card — grid rows stay perfectly aligned.
 
 struct BurstStackCard: View {
-    let stack: BurstStack
+    let stack: PhotoGroup
     @ObservedObject var manager: SDCardManager
     let visibleCount: Int
+    /// When set, replaces the default "Burst — X photos" label below the thumbnail.
+    var titleOverride: String? = nil
 
     // ── Selection mode support ──────────────────────────────────────────
     var isSelectMode: Bool = false
@@ -175,7 +177,7 @@ struct BurstStackCard: View {
                     Text("A\nA")
                         .font(.caption.weight(.medium))
                         .opacity(0)
-                    Text("Burst — \(stack.count) photos")
+                    Text(titleOverride ?? "Burst — \(stack.count) photos")
                         .font(.caption.weight(.medium))
                         .lineLimit(2)
                         .truncationMode(.middle)
@@ -478,12 +480,12 @@ struct BurstCountBadge: View {
 // MARK: - BurstLabelPickerSheet
 
 struct BurstLabelPickerSheet: View {
-    let stack: BurstStack
+    let stack: PhotoGroup
     @ObservedObject var manager: SDCardManager
 
     @State private var pickStatus: PickStatus
 
-    init(stack: BurstStack, manager: SDCardManager) {
+    init(stack: PhotoGroup, manager: SDCardManager) {
         self.stack = stack
         self.manager = manager
         _pickStatus = State(initialValue: stack.coverFile.pickStatus)

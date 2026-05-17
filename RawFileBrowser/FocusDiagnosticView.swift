@@ -26,34 +26,11 @@ struct FocusDiagnosticView: View {
                                                                 || file.focusRegion == .humanFace
                                                                 ? "Yes" : "No")
                         if let overlaps = file.afOverlapsSubject {
-                            DiagRow("AF overlaps subject", value: overlaps ? "Yes ✓" : "No ✗",
+                            DiagRow("AF on subject", value: overlaps ? "Yes ✓" : "No ✗",
                                     highlight: overlaps ? .green : .red)
                         }
                         DiagRow("Analysis branch",      value: branchDescription(file))
                         DiagRow("Scoring region",        value: file.focusRegion.rawValue)
-                    }
-
-                    // ── AF / Eye overlap ─────────────────────────────────────
-                    if file.hadAFPoint {
-                        DiagSection(title: "AF / Eye Overlap", icon: "eye") {
-                            DiagRow("AF on subject",
-                                    value: triStateLabel(file.afOverlapsSubject,
-                                                         yes: "Yes ✓", no: "No ✗", unknown: "No subject"),
-                                    highlight: triStateColor(file.afOverlapsSubject))
-
-                            DiagRow("AF on eye",
-                                    value: triStateLabel(file.afOnEye,
-                                                         yes: "Yes ✓", no: "No ✗", unknown: "No eye detected"),
-                                    highlight: triStateColor(file.afOnEye),
-                                    bold: true)
-
-                            DiagRow("Eye detected",
-                                    value: file.afOnEye != nil ? "Yes" : "No",
-                                    highlight: file.afOnEye != nil ? .primary : .secondary)
-                        }
-
-                        // Explanatory note below the section
-                        AFEyeExplanationCard(afOnEye: file.afOnEye, hadAFPoint: file.hadAFPoint)
                     }
 
                     // ── Sharpness numbers ────────────────────────────────────
@@ -402,57 +379,6 @@ private struct DiagSection<Content: View>: View {
             }
             .background(RoundedRectangle(cornerRadius: 14)
                 .fill(Color(.secondarySystemGroupedBackground)))
-        }
-    }
-}
-
-// MARK: - AF / Eye explanation card
-
-private struct AFEyeExplanationCard: View {
-    let afOnEye: Bool?
-    let hadAFPoint: Bool
-
-    var body: some View {
-        HStack(alignment: .top, spacing: 10) {
-            Image(systemName: iconName)
-                .font(.system(size: 20))
-                .foregroundStyle(iconColor)
-                .frame(width: 28)
-
-            Text(message)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        .padding()
-        .background(
-            RoundedRectangle(cornerRadius: 12)
-                .fill(iconColor.opacity(0.08))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 12)
-                        .strokeBorder(iconColor.opacity(0.2), lineWidth: 1)
-                )
-        )
-    }
-
-    private var iconName: String {
-        guard let v = afOnEye else { return "eye.slash" }
-        return v ? "eye.circle.fill" : "eye.trianglebadge.exclamationmark"
-    }
-
-    private var iconColor: Color {
-        guard let v = afOnEye else { return .secondary }
-        return v ? .green : .orange
-    }
-
-    private var message: String {
-        guard let v = afOnEye else {
-            return "No eye was detected in this image, so it is not possible to determine whether the AF point covered the eye. This is normal for distant subjects, side-on angles, or non-animal photos."
-        }
-        if v {
-            return "The camera's AF point overlapped the detected eye region. This is the best possible outcome — the lens was focused at the eye. The sharpness score above reflects how sharp that region actually is."
-        } else {
-            return "An eye was detected but the AF point did not cover it. The camera focused on a different part of the subject (body, background, or nearby object). The eye may still be acceptably sharp if the subject was at a similar distance, but check carefully at 100%."
         }
     }
 }

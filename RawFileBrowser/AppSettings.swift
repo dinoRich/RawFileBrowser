@@ -50,6 +50,16 @@ final class AppSettings: ObservableObject {
         didSet { UserDefaults.standard.set(speciesConfidenceThreshold, forKey: "speciesConfidenceThreshold") }
     }
 
+    // ── Similar photo detection ───────────────────────────────────────────
+    /// Maximum Hamming distance (differing bits out of 64) between two perceptual
+    /// hashes for the photos to be considered "similar".
+    /// Lower = stricter (only near-identical photos match).
+    /// Higher = looser (more photos grouped together).
+    /// Range 1–20. Default 10.
+    @Published var similarityThreshold: Int {
+        didSet { UserDefaults.standard.set(similarityThreshold, forKey: "similarityThreshold") }
+    }
+
     // ── Focus outcome actions ────────────────────────────────────────────
     /// What to do automatically when a photo is rated Sharp.
     @Published var sharpAction: FocusOutcomeAction {
@@ -72,6 +82,9 @@ final class AppSettings: ObservableObject {
 
         // Species confidence threshold — default 0.5 (50 %)
         self.speciesConfidenceThreshold = UserDefaults.standard.object(forKey: "speciesConfidenceThreshold") as? Double ?? 0.5
+
+        // Similarity threshold — default 10 bits
+        self.similarityThreshold = UserDefaults.standard.object(forKey: "similarityThreshold") as? Int ?? 10
 
         // Outcome actions — sensible defaults that match the previous hardcoded behaviour:
         //   sharp        → accepted
