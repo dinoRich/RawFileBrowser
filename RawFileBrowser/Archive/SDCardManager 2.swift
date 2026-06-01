@@ -657,36 +657,53 @@ final class SDCardManager: ObservableObject {
         let total       = rawFiles.count
         let urls        = rawFiles.map { $0.url }
 
-        print("[Analyze] starting — \(total) files")
-        for batchStart in stride(from: 0, to: total, by: 6) {
-            if analysisCancelled { break }
-            let batchEnd = min(batchStart + 6, total)
-            print("[Analyze] batch \(batchStart)..<\(batchEnd)")
+        // Run all heavy work on a detached background task so the @MainActor
+        // is free to process UI updates (progress bar, thumbnail badges) between
+        // batches. Results are published back to the main actor as each batch
+        // completes. Without this, withTaskGroup child tasks inherit the main
+        // actor and the UI freezes at 0% until the entire analysis finishes.
+        await Task.detached(priority: .userInitiated) { [weak self] in
+            guard let self else { return }
 
-            await withTaskGroup(of: (Int, FocusResult).self) { group in
+            let batchSize = 6
+            for batchStart in stride(from: 0, to: total, by: batchSize) {
+                let cancelled = await MainActor.run { self.analysisCancelled }
+                if cancelled { break }
+                let batchEnd = min(batchStart + batchSize, total)
+
+                // Serial thumbnail load on this background thread
+                var batch: [(index: Int, url: URL, cgImage: CGImage)] = []
                 for i in batchStart..<batchEnd {
-                    let url = urls[i]
-                    group.addTask {
-                        print("[Analyze] task started for \(url.lastPathComponent)")
-                        let r = await FocusAnalyzer.analyze(url: url,
-                                                            sharpThreshold: sharpT,
-                                                            acceptableThreshold: acceptableT)
-                        print("[Analyze] task done for \(url.lastPathComponent)")
-                        return (i, r)
+                    if let img = FocusAnalyzer.loadThumbnail(from: urls[i], maxDimension: 2048) {
+                        batch.append((i, urls[i], img))
                     }
                 }
-                for await (i, result) in group {
-                    applyFocusResult(result, to: i)
+
+                // Concurrent analysis on the decoded images
+                await withTaskGroup(of: (Int, FocusResult).self) { group in
+                    for item in batch {
+                        group.addTask {
+                            (item.index, await FocusAnalyzer.analyze(
+                                cgImage: item.cgImage,
+                                url:     item.url,
+                                sharpThreshold:      sharpT,
+                                acceptableThreshold: acceptableT))
+                        }
+                    }
+                    for await (i, result) in group {
+                        await MainActor.run { self.applyFocusResult(result, to: i) }
+                    }
                 }
+                await MainActor.run { self.analysisProgress = Double(batchEnd) / Double(total) }
             }
-            analysisProgress = Double(batchEnd) / Double(total)
-            print("[Analyze] progress \(Int(analysisProgress * 100))%")
-        }
-        isAnalyzing = false
-        analysisCancelled = false
-        rebuildAllGroups()
-        runBurstSharpnessRanking()
-        print("[Analyze] complete")
+
+            await MainActor.run {
+                self.isAnalyzing = false
+                self.analysisCancelled = false
+                self.rebuildAllGroups()
+                self.runBurstSharpnessRanking()
+            }
+        }.value
     }
 
     func analyzeFocus(for file: RAWFile) async {

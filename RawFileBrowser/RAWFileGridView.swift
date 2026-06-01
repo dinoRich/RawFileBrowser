@@ -51,6 +51,10 @@ struct RAWFileGridView: View {
         case colourBlue   = "Blue"
         case colourPurple = "Purple"
         case species      = "Species"
+        case burstBest    = "Best"
+        case overexposed  = "Overexposed"
+        case underexposed = "Underexposed"
+        case clipped      = "Clipped"
     }
 
     // MARK: - Pill counts
@@ -77,6 +81,16 @@ struct RAWFileGridView: View {
         case .colourBlue:   return manager.rawFiles.filter { $0.labelColour == .blue }.count
         case .colourPurple: return manager.rawFiles.filter { $0.labelColour == .purple }.count
         case .species:    return manager.speciesPhotoCount
+        case .burstBest:  return manager.rawFiles.filter { $0.isBurstSharpnessBest }.count
+        case .overexposed:
+            return manager.rawFiles.filter { f in
+                f.exposureAssessment.flatMap { manager.settings?.exposureIssue(for: $0) } == .overexposed
+            }.count
+        case .underexposed:
+            return manager.rawFiles.filter { f in
+                f.exposureAssessment.flatMap { manager.settings?.exposureIssue(for: $0) } == .underexposed
+            }.count
+        case .clipped:    return manager.rawFiles.filter { $0.subjectClipped }.count
         }
     }
 
@@ -86,7 +100,7 @@ struct RAWFileGridView: View {
             case .all:     return true
             case .bursts:  return manager.burstPhotoCount > 0
             case .similar:  return manager.similarPhotoCount > 0
-            case .species:  return manager.speciesPhotoCount > 0 || manager.isAnalyzingSpecies
+            case .species:  return manager.speciesPhotoCount > 0
             default:        return pillCount(for: mode) > 0
             }
         }
@@ -203,6 +217,14 @@ struct RAWFileGridView: View {
         case .colourGreen:  return file.labelColour == .green
         case .colourBlue:   return file.labelColour == .blue
         case .colourPurple: return file.labelColour == .purple
+        case .burstBest:    return file.isBurstSharpnessBest
+        case .clipped:      return file.subjectClipped
+        case .overexposed:
+            guard let ea = file.exposureAssessment else { return false }
+            return manager.settings?.exposureIssue(for: ea) == .overexposed
+        case .underexposed:
+            guard let ea = file.exposureAssessment else { return false }
+            return manager.settings?.exposureIssue(for: ea) == .underexposed
         }
     }
 
@@ -285,7 +307,6 @@ struct RAWFileGridView: View {
         VStack(spacing: 0) {
             if manager.isAnalyzing        { analysisBanner }
             if manager.isComputingHashes  { hashBanner }
-            if manager.isAnalyzingSpecies { speciesBanner }
 
             if isSelectMode {
                 HStack {
@@ -301,13 +322,20 @@ struct RAWFileGridView: View {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 8) {
                     ForEach(visibleFilterModes, id: \.self) { mode in
+                        let burstGroupCount = manager.gridItems.filter {
+                            if case .group(let g) = $0, g.isBurst { return true }
+                            return false
+                        }.count
                         FilterPill(
                             mode: mode,
                             count: pillCount(for: mode),
                             isSelected: filterMode == mode,
                             label: mode == .species
                                 ? "Species \(manager.speciesGroups.count) (\(manager.speciesPhotoCount))"
-                                : nil
+                                : mode == .bursts
+                                ? "Bursts \(burstGroupCount) (\(manager.burstPhotoCount))"
+                                : nil,
+                            systemImage: mode == .burstBest ? "crown.fill" : nil
                         ) { filterMode = mode }
                     }
                 }
@@ -455,9 +483,7 @@ struct RAWFileGridView: View {
 
     @ViewBuilder
     private var similarContent: some View {
-        if manager.isAnalyzingSpecies {
-            Spacer()
-        } else if filteredSimilarGroups.isEmpty {
+        if filteredSimilarGroups.isEmpty {
             VStack(spacing: 16) {
                 Image(systemName: "square.on.square.dashed")
                     .font(.system(size: 60)).foregroundStyle(.secondary)
@@ -497,16 +523,7 @@ struct RAWFileGridView: View {
 
     @ViewBuilder
     private var speciesContent: some View {
-        if manager.isAnalyzingSpecies && manager.speciesGroups.isEmpty {
-            VStack(spacing: 16) {
-                ProgressView()
-                Text("Identifying species…")
-                    .font(.title2.weight(.semibold))
-                Text("Groups will appear as photos are identified.")
-                    .foregroundStyle(.secondary).multilineTextAlignment(.center)
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity).padding()
-        } else if manager.speciesGroups.isEmpty {
+        if manager.speciesGroups.isEmpty {
             VStack(spacing: 16) {
                 Image(systemName: "pawprint")
                     .font(.system(size: 60)).foregroundStyle(.secondary)
@@ -621,18 +638,6 @@ struct RAWFileGridView: View {
         .background(Color(.secondarySystemBackground))
     }
 
-    private var speciesBanner: some View {
-        HStack {
-            ProgressView().padding(.trailing, 4)
-            Text("Identifying species…").font(.subheadline.weight(.medium))
-            Spacer()
-            Text("\(Int(manager.speciesProgress * 100))%")
-                .font(.subheadline.monospacedDigit()).foregroundStyle(.secondary)
-        }
-        .padding(.horizontal).padding(.vertical, 10)
-        .background(Color(.secondarySystemBackground))
-    }
-
     private var hashBanner: some View {
         HStack {
             ProgressView().padding(.trailing, 4)
@@ -712,6 +717,16 @@ struct GroupDetailView: View {
         case .colourGreen:  return liveFiles.filter { $0.labelColour == .green }.count
         case .colourBlue:   return liveFiles.filter { $0.labelColour == .blue }.count
         case .colourPurple: return liveFiles.filter { $0.labelColour == .purple }.count
+        case .burstBest:    return liveFiles.filter { $0.isBurstSharpnessBest }.count
+        case .clipped:      return liveFiles.filter { $0.subjectClipped }.count
+        case .overexposed:
+            return liveFiles.filter { f in
+                f.exposureAssessment.flatMap { manager.settings?.exposureIssue(for: $0) } == .overexposed
+            }.count
+        case .underexposed:
+            return liveFiles.filter { f in
+                f.exposureAssessment.flatMap { manager.settings?.exposureIssue(for: $0) } == .underexposed
+            }.count
         }
     }
 
@@ -734,6 +749,16 @@ struct GroupDetailView: View {
         case .colourGreen:  return liveFiles.filter { $0.labelColour == .green }
         case .colourBlue:   return liveFiles.filter { $0.labelColour == .blue }
         case .colourPurple: return liveFiles.filter { $0.labelColour == .purple }
+        case .burstBest:    return liveFiles.filter { $0.isBurstSharpnessBest }
+        case .clipped:      return liveFiles.filter { $0.subjectClipped }
+        case .overexposed:
+            return liveFiles.filter { f in
+                f.exposureAssessment.flatMap { manager.settings?.exposureIssue(for: $0) } == .overexposed
+            }
+        case .underexposed:
+            return liveFiles.filter { f in
+                f.exposureAssessment.flatMap { manager.settings?.exposureIssue(for: $0) } == .underexposed
+            }
         }
     }
 
@@ -783,7 +808,9 @@ struct GroupDetailView: View {
                 HStack(spacing: 8) {
                     ForEach(visibleFilterModes, id: \.self) { mode in
                         FilterPill(mode: mode, count: count(for: mode),
-                                   isSelected: filterMode == mode) { filterMode = mode }
+                                   isSelected: filterMode == mode,
+                                   systemImage: mode == .burstBest ? "crown.fill" : nil
+                        ) { filterMode = mode }
                     }
                 }
                 .padding(.horizontal).padding(.vertical, 8)
@@ -1029,17 +1056,25 @@ struct FilterPill: View {
     let mode: RAWFileGridView.FilterMode
     let count: Int
     let isSelected: Bool
-    var label: String? = nil   // overrides default "Mode N" format when set
+    var label: String? = nil
+    var systemImage: String? = nil
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
-            Text(label ?? "\(mode.rawValue) \(count)")
-                .font(.subheadline.weight(isSelected ? .semibold : .regular))
-                .padding(.horizontal, 12).padding(.vertical, 6)
-                .background(isSelected ? Color.accentColor : Color(.tertiarySystemBackground))
-                .foregroundStyle(isSelected ? .white : .primary)
-                .clipShape(Capsule())
+            HStack(spacing: 4) {
+                if let systemImage {
+                    Image(systemName: systemImage)
+                        .font(.subheadline.weight(isSelected ? .semibold : .regular))
+                        .foregroundStyle(isSelected ? .white : .yellow)
+                }
+                Text(label ?? "\(mode.rawValue) \(count)")
+                    .font(.subheadline.weight(isSelected ? .semibold : .regular))
+            }
+            .padding(.horizontal, 12).padding(.vertical, 6)
+            .background(isSelected ? Color.accentColor : Color(.tertiarySystemBackground))
+            .foregroundStyle(isSelected ? .white : .primary)
+            .clipShape(Capsule())
         }
         .buttonStyle(.plain)
     }

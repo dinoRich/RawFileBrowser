@@ -87,6 +87,29 @@ struct RAWFileThumbnailCard: View {
                             .padding(6)
                     }
 
+                    // ── Top-centre: burst rank badge ─────────────────────
+                    if let rank = live.burstRank {
+                        HStack(spacing: 3) {
+                            Image(systemName: "crown.fill")
+                                .font(.system(size: 11, weight: .bold))
+                                .foregroundStyle(
+                                    rank == 1 ? Color.yellow :
+                                    rank == 2 ? Color(white: 0.75) :
+                                                Color(red: 0.72, green: 0.45, blue: 0.20)
+                                )
+                            Text("\(rank)")
+                                .font(.system(size: 11, weight: .bold))
+                                .foregroundStyle(.white)
+                        }
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 4)
+                        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 6))
+                        .shadow(radius: 2)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity,
+                               alignment: .top)
+                        .padding(.top, 6)
+                    }
+
                     // ── Bottom-right: pick/flag badge ────────────────────
                     if live.pickStatus != .unpicked {
                         PickFlagBadge(status: live.pickStatus)

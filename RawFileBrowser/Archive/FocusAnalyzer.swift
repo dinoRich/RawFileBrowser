@@ -258,12 +258,6 @@ struct FocusAnalyzer {
     // can cause createCGImage to return nil under memory pressure.
     private static let sharedCIContext = CIContext(options: [.useSoftwareRenderer: false])
 
-    /// Serial queue for VNGenerateForegroundInstanceMaskRequest.
-    /// Running multiple mask requests concurrently causes the same Neural Engine
-    /// contention as concurrent YOLO calls — none complete. Serialising fixes this.
-    private static let maskQueue = DispatchQueue(label: "com.sharpeye.visionmask",
-                                                  qos: .userInitiated)
-
     // MARK: - Entry point
     //
     // Decision tree:
@@ -309,6 +303,9 @@ struct FocusAnalyzer {
         let afRect      = afRegion?.rect
         let afConfirmed = afRegion?.confirmed ?? false
 
+        // Steps 2 & 4 — Subject detection and species classification run concurrently.
+        // SpeciesDetector falls back to the full image when subjectBodyRect is nil,
+        // which is acceptable — the classifier performs well on full wildlife images.
         async let subjectTask = detectSubject(in: cgImage)
         async let speciesTask = SpeciesDetector.classify(cgImage: cgImage, subjectBodyRect: nil)
         let subject       = await subjectTask
@@ -949,6 +946,7 @@ struct FocusAnalyzer {
     }
 
     private static func detectSubject(in cgImage: CGImage) async -> SubjectResult {
+
         // Contour detection only — YOLO is no longer called here.
         // SpeciesDetector.classify handles YOLO separately. Running YOLO twice
         // per photo (once here, once in SpeciesDetector) doubled Neural Engine
@@ -1022,7 +1020,6 @@ struct FocusAnalyzer {
     private static func foregroundMaskContour(cgImage: CGImage) async -> [[CGPoint]] {
         return await withCheckedContinuation { (continuation: CheckedContinuation<[[CGPoint]], Never>) in
 
-            maskQueue.async {
             let maskRequest = VNGenerateForegroundInstanceMaskRequest()
             let handler     = VNImageRequestHandler(cgImage: cgImage, options: [:])
 
@@ -1125,7 +1122,6 @@ struct FocusAnalyzer {
             }
 
             continuation.resume(returning: allContours)
-            } // end maskQueue.async
         }
     }
         /// Morphological dilation: expands white (255) pixels outward by `radius` pixels.

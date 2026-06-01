@@ -4,7 +4,7 @@ import SwiftUI
 //
 // A modal settings page presented as a sheet.
 // Shows:
-//   1. A sharpening slider (controls unsharp mask intensity pre-analysis)
+//   1. Sharpness threshold sliders (Sharp / Acceptable cutpoints)
 //   2. A species ID confidence threshold slider
 //   3. Three rows — one per focus outcome — each letting the user choose:
 //        • Pick flag (accept / reject / none)
@@ -19,52 +19,72 @@ struct SettingsView: View {
         NavigationStack {
             List {
 
-                // ── Section 1: Sharpening ─────────────────────────────────
+                // ── Section 1: Sharpness thresholds ──────────────────────────
                 Section {
-                    VStack(alignment: .leading, spacing: 10) {
-                        HStack {
-                            Text("Sharpening Strength")
-                                .font(.body)
-                            Spacer()
-                            Text(String(format: "%.2f", settings.sharpenIntensity))
-                                .font(.body.monospacedDigit())
-                                .foregroundStyle(.secondary)
-                        }
-
-                        Slider(value: $settings.sharpenIntensity, in: 0...1, step: 0.05)
-                            .tint(.accentColor)
-
-                        Text("Applied to each image crop before focus scoring. Higher values compensate for heavy JPEG compression but may inflate scores on blurry images. 0 = off, 0.4 = default.")
+                    VStack(alignment: .leading, spacing: 16) {
+                        Text("These control when a photo is rated Sharp (green), Slightly Blurry (orange), or Blurry (red). The score shown in diagnostics is 0–1; higher = sharper. Raise the Sharp threshold to be stricter; lower it to pass more photos. Re-run analysis after changing.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
+
+                        ThresholdSliderRow(
+                            label: "Sharp",
+                            detail: "Score at or above this → green badge",
+                            color: .green,
+                            value: $settings.sharpThreshold,
+                            range: 0.25...0.95
+                        )
+
+                        ThresholdSliderRow(
+                            label: "Acceptable",
+                            detail: "Score at or above this → orange; below → red",
+                            color: .orange,
+                            value: $settings.acceptableThreshold,
+                            range: 0.10...0.70
+                        )
                     }
                     .padding(.vertical, 4)
                 } header: {
-                    Text("Pre-Analysis Sharpening")
+                    Text("Sharpness Thresholds")
+                } footer: {
+                    Text("Acceptable must be lower than Sharp. Defaults: Sharp 0.62, Acceptable 0.32.")
                 }
 
-                // ── Section 2: Species ID confidence threshold ────────────────
+                // ── Section 2: Species ID confidence thresholds ──────────────
                 Section {
-                    VStack(alignment: .leading, spacing: 10) {
-                        HStack {
-                            Text("Minimum Confidence")
-                                .font(.body)
-                            Spacer()
-                            Text("\(Int(settings.speciesConfidenceThreshold * 100))%")
-                                .font(.body.monospacedDigit())
-                                .foregroundStyle(.secondary)
-                        }
-
-                        Slider(value: $settings.speciesConfidenceThreshold, in: 0...1, step: 0.05)
-                            .tint(.accentColor)
-
-                        Text("Species identifications below this confidence level will be hidden and excluded from XMP files. The detection still runs — only the display is filtered. Default is 50%.")
+                    VStack(alignment: .leading, spacing: 16) {
+                        Text("Minimum confidence required to display a species ID, based on how much of the frame the subject occupies. Tighter thresholds for smaller subjects reduce confident misidentifications caused by background texture. Species identification runs as part of focus analysis.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
+
+                        SpeciesThresholdRow(
+                            label: "Tiny (0–1%)",
+                            detail: "Subject is a distant speck",
+                            value: $settings.speciesConfidenceTiny
+                        )
+                        SpeciesThresholdRow(
+                            label: "Small (1–5%)",
+                            detail: "Subject small in frame",
+                            value: $settings.speciesConfidenceSmall
+                        )
+                        SpeciesThresholdRow(
+                            label: "Medium (5–10%)",
+                            detail: "Subject reasonably sized",
+                            value: $settings.speciesConfidenceMedium
+                        )
+                        SpeciesThresholdRow(
+                            label: "Large (10–25%)",
+                            detail: "Subject prominent in frame",
+                            value: $settings.speciesConfidenceLarge
+                        )
+                        SpeciesThresholdRow(
+                            label: "Full (25%+)",
+                            detail: "Subject fills the frame",
+                            value: $settings.speciesConfidenceFull
+                        )
                     }
                     .padding(.vertical, 4)
                 } header: {
-                    Text("Species ID Threshold")
+                    Text("Species ID Thresholds")
                 }
 
                 // ── Section 3: Similar photo threshold ───────────────────────
@@ -123,6 +143,60 @@ struct SettingsView: View {
                     Text("These are applied automatically when focus analysis completes. You can still change individual photos manually afterwards. \"None\" means the app takes no action for that setting.")
                 }
 
+                // ── Section 5: Flag-based auto-actions ────────────────────
+                Section {
+                    OutcomeRow(
+                        label: "Subject Clipped",
+                        icon: "rectangle.and.arrow.up.right.and.arrow.down.left",
+                        iconColor: .purple,
+                        action: $settings.subjectClippedAction
+                    )
+                    OutcomeRow(
+                        label: "Soft in Burst",
+                        icon: "waveform.path.ecg",
+                        iconColor: .cyan,
+                        action: $settings.softInBurstAction
+                    )
+
+                    VStack(alignment: .leading, spacing: 10) {
+                        OutcomeRow(
+                            label: "Overexposed",
+                            icon: "sun.max.fill",
+                            iconColor: .yellow,
+                            action: $settings.overexposedAction
+                        )
+                        ThresholdSliderRow(
+                            label: "Overexposure level",
+                            detail: "% of subject pixels blown (\u{2265}250/255)",
+                            color: .yellow,
+                            value: $settings.overexposureThreshold,
+                            range: 0.01...0.20,
+                            formatAsPercent: true
+                        )
+                    }
+
+                    VStack(alignment: .leading, spacing: 10) {
+                        OutcomeRow(
+                            label: "Underexposed",
+                            icon: "moon.fill",
+                            iconColor: .blue,
+                            action: $settings.underexposedAction
+                        )
+                        ThresholdSliderRow(
+                            label: "Underexposure level",
+                            detail: "% of subject pixels blocked (\u{2264}5/255)",
+                            color: .blue,
+                            value: $settings.underexposureThreshold,
+                            range: 0.02...0.40,
+                            formatAsPercent: true
+                        )
+                    }
+                } header: {
+                    Text("Flag-Based Auto-Actions")
+                } footer: {
+                    Text("Applied on top of the focus status action above. Subject Clipped fires when the detected subject touches the frame edge. Soft in Burst fires when a photo is significantly softer than its burst peers. Exposure flags use the subject region where available. Re-run analysis after changing exposure levels.")
+                }
+
             }
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
@@ -131,6 +205,43 @@ struct SettingsView: View {
                     Button("Done") { dismiss() }
                 }
             }
+        }
+    }
+}
+
+// MARK: - ThresholdSliderRow
+
+private struct ThresholdSliderRow: View {
+    let label:  String
+    let detail: String
+    let color:  Color
+    @Binding var value: Double
+    let range: ClosedRange<Double>
+    var formatAsPercent: Bool = false
+
+    private var displayValue: String {
+        formatAsPercent
+            ? String(format: "%.0f%%", value * 100)
+            : String(format: "%.2f", value)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                HStack(spacing: 6) {
+                    Circle().fill(color).frame(width: 10, height: 10)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(label).font(.subheadline.weight(.medium))
+                        Text(detail).font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+                Spacer()
+                Text(displayValue)
+                    .font(.body.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .frame(width: 48, alignment: .trailing)
+            }
+            Slider(value: $value, in: range, step: formatAsPercent ? 0.01 : 0.01).tint(color)
         }
     }
 }
@@ -228,6 +339,35 @@ private struct StarPicker: View {
                 }
                 .buttonStyle(.plain)
             }
+        }
+    }
+}
+
+// MARK: - SpeciesThresholdRow
+
+private struct SpeciesThresholdRow: View {
+    let label: String
+    let detail: String
+    @Binding var value: Double
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(label)
+                        .font(.subheadline)
+                    Text(detail)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Text("\(Int(value * 100))%")
+                    .font(.body.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .frame(width: 44, alignment: .trailing)
+            }
+            Slider(value: $value, in: 0...1, step: 0.05)
+                .tint(.accentColor)
         }
     }
 }

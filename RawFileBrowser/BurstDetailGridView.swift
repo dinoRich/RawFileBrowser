@@ -50,6 +50,16 @@ struct BurstDetailGridView: View {
         case .colourGreen:  return liveFiles.filter { $0.labelColour == .green }.count
         case .colourBlue:   return liveFiles.filter { $0.labelColour == .blue }.count
         case .colourPurple: return liveFiles.filter { $0.labelColour == .purple }.count
+        case .burstBest:    return liveFiles.filter { $0.isBurstSharpnessBest }.count
+        case .clipped:      return liveFiles.filter { $0.subjectClipped }.count
+        case .overexposed:
+            return liveFiles.filter { f in
+                f.exposureAssessment.flatMap { manager.settings?.exposureIssue(for: $0) } == .overexposed
+            }.count
+        case .underexposed:
+            return liveFiles.filter { f in
+                f.exposureAssessment.flatMap { manager.settings?.exposureIssue(for: $0) } == .underexposed
+            }.count
         }
     }
 
@@ -73,6 +83,16 @@ struct BurstDetailGridView: View {
         case .colourGreen:  return liveFiles.filter { $0.labelColour == .green }
         case .colourBlue:   return liveFiles.filter { $0.labelColour == .blue }
         case .colourPurple: return liveFiles.filter { $0.labelColour == .purple }
+        case .burstBest:    return liveFiles.filter { $0.isBurstSharpnessBest }
+        case .clipped:      return liveFiles.filter { $0.subjectClipped }
+        case .overexposed:
+            return liveFiles.filter { f in
+                f.exposureAssessment.flatMap { manager.settings?.exposureIssue(for: $0) } == .overexposed
+            }
+        case .underexposed:
+            return liveFiles.filter { f in
+                f.exposureAssessment.flatMap { manager.settings?.exposureIssue(for: $0) } == .underexposed
+            }
         }
     }
 
@@ -102,7 +122,8 @@ struct BurstDetailGridView: View {
                         FilterPill(
                             mode: mode,
                             count: count(for: mode),
-                            isSelected: filterMode == mode
+                            isSelected: filterMode == mode,
+                            systemImage: mode == .burstBest ? "crown.fill" : nil
                         ) {
                             filterMode = mode
                         }

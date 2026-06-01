@@ -263,7 +263,8 @@ struct RAWFileDetailView: View {
                                     subjectContour: file.subjectContour,
                                     detectedLabel: settings.visibleSpeciesLabel(
                                         label: file.detectedAnimalLabel,
-                                        confidence: file.detectionConfidence
+                                        confidence: file.detectionConfidence,
+                                        subjectBodyArea: file.subjectBodyArea
                                     )
                                 )
                             }
@@ -426,7 +427,7 @@ struct RAWFileDetailView: View {
             if fullImage != nil {
                 Button("Share") { showShareSheet = true }
             }
-            if settings.visibleSpeciesLabel(label: file.detectedAnimalLabel, confidence: file.detectionConfidence) != nil {
+            if settings.visibleSpeciesLabel(label: file.detectedAnimalLabel, confidence: file.detectionConfidence, subjectBodyArea: file.subjectBodyArea) != nil {
                 Button(file.xmpWritten ? "XMP Already Written" : "Write XMP") {
                     if !file.xmpWritten {
                         do {
@@ -545,7 +546,7 @@ struct RAWFileDetailView: View {
             .buttonStyle(.plain)
             if file.focusStatus != .unanalyzed || file.detectedAnimalLabel != nil {
                 VStack(spacing: 5) {
-                    if let label = settings.visibleSpeciesLabel(label: file.detectedAnimalLabel, confidence: file.detectionConfidence) {
+                    if let label = settings.visibleSpeciesLabel(label: file.detectedAnimalLabel, confidence: file.detectionConfidence, subjectBodyArea: file.subjectBodyArea) {
                         HStack(spacing: 4) {
                             Image(systemName: "pawprint.fill")
                             Text(label.replacingOccurrences(of: "_", with: " ").capitalized)
@@ -919,10 +920,10 @@ struct AFPointOverlay: View {
             ForEach(Array(points.enumerated()), id: \.offset) { _, point in
                 let r = imageFrame.projectedToScreenAFPoint(
                     normRect: point.normRect, scale: scale, offset: offset)
-                let color: Color = point.isInFocus ? .green : .white.opacity(0.6)
+                let color: Color = point.isInFocus ? .green : .red
                 let arm = max(6, min(r.width, r.height) * 0.35)
                 AFBrackets(rect: r, color: color, armLength: arm,
-                           lineWidth: point.isInFocus ? 2.0 : 1.0)
+                           lineWidth: point.isInFocus ? 2.0 : 1.5)
             }
         }
         .allowsHitTesting(false)

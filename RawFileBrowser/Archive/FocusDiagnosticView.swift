@@ -21,7 +21,7 @@ struct FocusDiagnosticView: View {
                     DiagSection(title: "Decision Path", icon: "arrow.triangle.branch") {
                         DiagRow("AF point in file",     value: file.hadAFPoint  ? "Yes" : "No",
                                 highlight: file.hadAFPoint ? .green : .secondary)
-                        DiagRow("Subject detected",     value: !file.subjectContour.isEmpty
+                        DiagRow("Subject detected",     value: file.detectedAnimalLabel != nil
                                                                 || file.focusRegion == .humanEyes
                                                                 || file.focusRegion == .humanFace
                                                                 ? "Yes" : "No")
@@ -111,43 +111,8 @@ struct FocusDiagnosticView: View {
                         }
 
                         if let label = file.detectedAnimalLabel {
-                            DiagRow("Detected species", value: label,
+                            DiagRow("Detected species",  value: label,
                                     detail: "Raw detection result (shown regardless of display threshold)")
-                        }
-
-                        if !file.speciesCandidates.isEmpty {
-                            Divider()
-                            Text("Species candidates")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                                .padding(.top, 4)
-                            ForEach(Array(file.speciesCandidates.enumerated()), id: \.offset) { index, candidate in
-                                HStack(spacing: 8) {
-                                    Text("\(index + 1).")
-                                        .font(.caption.monospacedDigit())
-                                        .foregroundStyle(.secondary)
-                                        .frame(width: 20, alignment: .trailing)
-                                    Text(candidate.label)
-                                        .font(.subheadline)
-                                    Spacer()
-                                    GeometryReader { geo in
-                                        ZStack(alignment: .leading) {
-                                            RoundedRectangle(cornerRadius: 3)
-                                                .fill(Color.secondary.opacity(0.2))
-                                                .frame(height: 6)
-                                            RoundedRectangle(cornerRadius: 3)
-                                                .fill(index == 0 ? Color.green : Color.secondary.opacity(0.5))
-                                                .frame(width: geo.size.width * CGFloat(candidate.confidence), height: 6)
-                                        }
-                                    }
-                                    .frame(width: 60, height: 6)
-                                    Text(String(format: "%.0f%%", candidate.confidence * 100))
-                                        .font(.caption.monospacedDigit())
-                                        .foregroundStyle(index == 0 ? .primary : .secondary)
-                                        .frame(width: 38, alignment: .trailing)
-                                }
-                                .padding(.vertical, 2)
-                            }
                         }
                     }
 
@@ -203,7 +168,7 @@ struct FocusDiagnosticView: View {
     }
 
     private func branchDescription(_ file: RAWFile) -> String {
-        switch (file.hadAFPoint, !file.subjectContour.isEmpty || isHuman(file)) {
+        switch (file.hadAFPoint, file.detectedAnimalLabel != nil || isHuman(file)) {
         case (true, true):
             if file.afNotOnSubject {
                 return "AF + Subject → AF not on subject (Cases 3/4)"
@@ -218,7 +183,7 @@ struct FocusDiagnosticView: View {
 
     private func ratingBasisColor(_ basis: FocusResult.RatingBasis) -> Color {
         switch basis {
-        case .afPoint:         return .secondary  // AF-only path (no subject detected)
+        case .afPoint:         return .green
         case .subjectBody:     return .primary
         case .afPointDegraded: return .orange
         case .fullImage:       return .secondary
@@ -334,8 +299,9 @@ private struct ThresholdGuideCard: View {
                                 y: 4)
                     }
 
-                    // Second needle — AF point raw score (shown whenever dual scores are available)
-                    if let afRaw = file.afPointRawScore, afRaw > 0 {
+                    // Second needle — AF point raw score (degraded AF only)
+                    if file.ratingBasis == .afPointDegraded,
+                       let afRaw = file.afPointRawScore, afRaw > 0 {
                         ZStack {
                             Diamond()
                                 .fill(Color.cyan.opacity(0.85))
@@ -366,8 +332,8 @@ private struct ThresholdGuideCard: View {
                 Text("100%").font(.caption2).foregroundStyle(.secondary)
             }
 
-            // Dual-score legend — shown whenever both AF point and body scores are available
-            if file.afPointRawScore != nil {
+            // Dual-score legend — only shown when AF was degraded and subject score was used instead
+            if file.ratingBasis == .afPointDegraded, file.afPointRawScore != nil {
                 HStack(spacing: 12) {
                     HStack(spacing: 4) {
                         Circle().fill(Color(file.focusStatus.color)).frame(width: 10, height: 10)

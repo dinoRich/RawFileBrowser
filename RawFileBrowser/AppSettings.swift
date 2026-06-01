@@ -32,22 +32,44 @@ struct FocusOutcomeAction: Codable, Equatable {
 final class AppSettings: ObservableObject {
 
     // ── Sharpening ────────────────────────────────────────────────────────
-    /// Strength of the unsharp mask applied to each crop before Laplacian scoring.
-    /// 0 = no sharpening, 1 = maximum sharpening.
-    /// The default (0.4) is conservative: enough to recover edge detail lost to
-    /// JPEG compression in the embedded preview, but not enough to inflate scores
-    /// on genuinely blurry images.
-    @Published var sharpenIntensity: Double {
-        didSet { UserDefaults.standard.set(sharpenIntensity, forKey: "sharpenIntensity") }
+    // ── Sharpness thresholds ──────────────────────────────────────────────
+    //
+    // Control how the Laplacian variance score (0–1) maps to badge colours.
+    //   score >= sharpThreshold      → Sharp  (green)
+    //   score >= acceptableThreshold → Slightly Blurry (orange)
+    //   score < acceptableThreshold  → Blurry (red)
+    //
+    // Defaults match the hardcoded RegionThresholds in FocusAnalyzer.
+    // Tune these in Settings after running analysis on a known set of photos.
+
+    @Published var sharpThreshold: Double {
+        didSet { UserDefaults.standard.set(sharpThreshold, forKey: "sharpThreshold") }
+    }
+    @Published var acceptableThreshold: Double {
+        didSet { UserDefaults.standard.set(acceptableThreshold, forKey: "acceptableThreshold") }
     }
 
-    // ── Species ID confidence threshold ──────────────────────────────────
-    /// Minimum YOLO confidence (0–1) required before a detected species name
-    /// is shown in the UI or written to an XMP sidecar.
-    /// Detection always runs in full — this only controls what is displayed.
-    /// Default 0.5 (50 %).
-    @Published var speciesConfidenceThreshold: Double {
-        didSet { UserDefaults.standard.set(speciesConfidenceThreshold, forKey: "speciesConfidenceThreshold") }
+    // ── Species ID confidence thresholds (per subject size) ───────────────
+    //
+    // Minimum classifier confidence required to display a species ID,
+    // depending on how much of the frame the subject occupies.
+    // Tighter (higher) thresholds for smaller subjects reduce confident
+    // misidentifications caused by background texture dominating the crop.
+
+    @Published var speciesConfidenceTiny: Double {       // subject < 1% of frame
+        didSet { UserDefaults.standard.set(speciesConfidenceTiny,   forKey: "speciesConfidenceTiny") }
+    }
+    @Published var speciesConfidenceSmall: Double {      // subject 1–5% of frame
+        didSet { UserDefaults.standard.set(speciesConfidenceSmall,  forKey: "speciesConfidenceSmall") }
+    }
+    @Published var speciesConfidenceMedium: Double {     // subject 5–10% of frame
+        didSet { UserDefaults.standard.set(speciesConfidenceMedium, forKey: "speciesConfidenceMedium") }
+    }
+    @Published var speciesConfidenceLarge: Double {      // subject 10–25% of frame
+        didSet { UserDefaults.standard.set(speciesConfidenceLarge,  forKey: "speciesConfidenceLarge") }
+    }
+    @Published var speciesConfidenceFull: Double {       // subject 25%+ of frame
+        didSet { UserDefaults.standard.set(speciesConfidenceFull,   forKey: "speciesConfidenceFull") }
     }
 
     // ── Similar photo detection ───────────────────────────────────────────
@@ -74,14 +96,56 @@ final class AppSettings: ObservableObject {
         didSet { saveAction(blurryAction, key: "blurryAction") }
     }
 
+    // ── Flag-based outcome actions ───────────────────────────────────────
+    // Applied on top of the focus status action above. If both fire,
+    // non-default values in the flag action override the status action.
+
+    /// Applied when the subject's bounding rect touches within 2% of any image edge.
+    @Published var subjectClippedAction: FocusOutcomeAction {
+        didSet { saveAction(subjectClippedAction, key: "subjectClippedAction") }
+    }
+    /// Applied when a photo is significantly softer than its burst peers (outlier).
+    @Published var softInBurstAction: FocusOutcomeAction {
+        didSet { saveAction(softInBurstAction, key: "softInBurstAction") }
+    }
+    /// Applied when the subject (or image) has too many blown highlight pixels.
+    @Published var overexposedAction: FocusOutcomeAction {
+        didSet { saveAction(overexposedAction, key: "overexposedAction") }
+    }
+    /// Applied when the subject (or image) has too many blocked shadow pixels.
+    @Published var underexposedAction: FocusOutcomeAction {
+        didSet { saveAction(underexposedAction, key: "underexposedAction") }
+    }
+
+    // ── Exposure thresholds ──────────────────────────────────────────────
+    // Fraction of subject pixels (0–1) that must be clipped before the
+    // overexposed / underexposed action fires. Subject pixels are checked
+    // first; whole-image highlight clipping is used as a fallback.
+
+    /// Fraction of subject pixels at ≥250/255 brightness before overexposed fires.
+    /// Default 0.03 (3%). Range 0.01–0.20.
+    @Published var overexposureThreshold: Double {
+        didSet { UserDefaults.standard.set(overexposureThreshold, forKey: "overexposureThreshold") }
+    }
+    /// Fraction of subject pixels at ≤5/255 brightness before underexposed fires.
+    /// Default 0.10 (10%). Range 0.02–0.40.
+    @Published var underexposureThreshold: Double {
+        didSet { UserDefaults.standard.set(underexposureThreshold, forKey: "underexposureThreshold") }
+    }
+
     // MARK: Init
 
     init() {
-        // Sharpening — default 0.4
-        self.sharpenIntensity = UserDefaults.standard.object(forKey: "sharpenIntensity") as? Double ?? 0.4
+        // Sharpness thresholds — defaults match RegionThresholds.body in FocusAnalyzer
+        self.sharpThreshold      = UserDefaults.standard.object(forKey: "sharpThreshold")      as? Double ?? 0.62
+        self.acceptableThreshold = UserDefaults.standard.object(forKey: "acceptableThreshold") as? Double ?? 0.32
 
-        // Species confidence threshold — default 0.5 (50 %)
-        self.speciesConfidenceThreshold = UserDefaults.standard.object(forKey: "speciesConfidenceThreshold") as? Double ?? 0.5
+        // Species confidence thresholds (per size band)
+        self.speciesConfidenceTiny   = UserDefaults.standard.object(forKey: "speciesConfidenceTiny")   as? Double ?? 0.90
+        self.speciesConfidenceSmall  = UserDefaults.standard.object(forKey: "speciesConfidenceSmall")  as? Double ?? 0.80
+        self.speciesConfidenceMedium = UserDefaults.standard.object(forKey: "speciesConfidenceMedium") as? Double ?? 0.70
+        self.speciesConfidenceLarge  = UserDefaults.standard.object(forKey: "speciesConfidenceLarge")  as? Double ?? 0.60
+        self.speciesConfidenceFull   = UserDefaults.standard.object(forKey: "speciesConfidenceFull")   as? Double ?? 0.50
 
         // Similarity threshold — default 10 bits
         self.similarityThreshold = UserDefaults.standard.object(forKey: "similarityThreshold") as? Int ?? 10
@@ -96,6 +160,20 @@ final class AppSettings: ObservableObject {
                                ?? FocusOutcomeAction(pick: .accepted, stars: 0, colour: .none)
         self.blurryAction       = AppSettings.loadAction(key: "blurryAction")
                                ?? FocusOutcomeAction(pick: .rejected, stars: 0, colour: .none)
+
+        // Flag-based actions — default: do nothing
+        self.subjectClippedAction = AppSettings.loadAction(key: "subjectClippedAction")
+                                 ?? FocusOutcomeAction()
+        self.softInBurstAction    = AppSettings.loadAction(key: "softInBurstAction")
+                                 ?? FocusOutcomeAction()
+        self.overexposedAction    = AppSettings.loadAction(key: "overexposedAction")
+                                 ?? FocusOutcomeAction()
+        self.underexposedAction   = AppSettings.loadAction(key: "underexposedAction")
+                                 ?? FocusOutcomeAction()
+
+        // Exposure thresholds
+        self.overexposureThreshold  = UserDefaults.standard.object(forKey: "overexposureThreshold")  as? Double ?? 0.03
+        self.underexposureThreshold = UserDefaults.standard.object(forKey: "underexposureThreshold") as? Double ?? 0.10
     }
 
     // MARK: - Persistence helpers
@@ -117,11 +195,41 @@ final class AppSettings: ObservableObject {
     // the user-configured threshold. Pass nil confidence (Vision fallback)
     // to always show — Vision does not produce a numeric confidence score.
 
-    func visibleSpeciesLabel(label: String?, confidence: Float?) -> String? {
+    // MARK: - Species threshold for a given subject area
+
+    /// Returns the confidence threshold appropriate for a subject occupying
+    /// `area` fraction of the image (normalised 0–1 area value).
+    func speciesThreshold(for area: Float) -> Double {
+        switch Double(area) {
+        case ..<0.01: return speciesConfidenceTiny
+        case ..<0.05: return speciesConfidenceSmall
+        case ..<0.10: return speciesConfidenceMedium
+        case ..<0.25: return speciesConfidenceLarge
+        default:      return speciesConfidenceFull
+        }
+    }
+
+    // MARK: - Species display helper
+
+    func visibleSpeciesLabel(label: String?, confidence: Float?,
+                             subjectBodyArea: Double = 0) -> String? {
         guard let label else { return nil }
-        // Vision fallback has no numeric confidence — always show it.
-        guard let confidence else { return label }
-        return Double(confidence) >= speciesConfidenceThreshold ? label : nil
+        guard let confidence else { return label }   // Vision fallback: always show
+        let threshold = speciesThreshold(for: Float(subjectBodyArea))
+        return Double(confidence) >= threshold ? label : nil
+    }
+
+    // MARK: - Exposure issue check (using user-configured thresholds)
+    //
+    // Returns the exposure verdict using the user's configured clip thresholds
+    // rather than the hardcoded values in ExposureAssessment.verdict.
+    // Subject clip fractions take priority over whole-image signals.
+
+    func exposureIssue(for ea: ExposureAssessment) -> ExposureVerdict? {
+        if let hc = ea.subjectHighlightClipFraction, hc >= overexposureThreshold  { return .overexposed  }
+        if let sc = ea.subjectShadowClipFraction,    sc >= underexposureThreshold { return .underexposed }
+        if ea.highlightClipFraction >= overexposureThreshold { return .overexposed }
+        return nil
     }
 
     // MARK: - Apply to a file

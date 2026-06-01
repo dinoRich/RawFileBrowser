@@ -4,24 +4,16 @@ import Combine
 
 // MARK: - Pick status
 
-/// Whether the user (or the auto-analysis pass) has accepted or rejected a photo.
-/// Separate from focus quality — the user can override the auto-set value.
 enum PickStatus: String, Codable {
-    case accepted   // white flag (black outline)
-    case rejected   // black flag (white outline) + greyed thumbnail
-    case unpicked   // no flag shown — not yet decided
+    case accepted
+    case rejected
+    case unpicked
 }
 
 // MARK: - Label colour
 
-/// A colour label the user can attach to a photo. `.none` means no label.
 enum LabelColour: String, Codable, CaseIterable {
-    case none
-    case red
-    case yellow
-    case green
-    case blue
-    case purple
+    case none, red, yellow, green, blue, purple
 }
 
 // MARK: - RAWFile model
@@ -29,10 +21,6 @@ enum LabelColour: String, Codable, CaseIterable {
 struct RAWFile: Identifiable {
     let id = UUID()
     let url: URL
-
-    // Stored once at init — never re-read from disk.
-    // modificationDate is accessed O(N log N) times during burst grouping sort,
-    // so a computed property hitting the filesystem each time is expensive.
     let name: String
     let fileExtension: String
     let modificationDate: Date?
@@ -41,14 +29,15 @@ struct RAWFile: Identifiable {
     var formattedSize: String { ByteCountFormatter.string(fromByteCount: size, countStyle: .file) }
 
     init(url: URL) {
-        self.url              = url
-        self.name             = url.lastPathComponent
-        self.fileExtension    = url.pathExtension.uppercased()
-        let rv                = try? url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
+        self.url           = url
+        self.name          = url.lastPathComponent
+        self.fileExtension = url.pathExtension.uppercased()
+        let rv             = try? url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
         self.modificationDate = rv?.contentModificationDate
-        self.size             = Int64(rv?.fileSize ?? 0)
+        self.size          = Int64(rv?.fileSize ?? 0)
     }
 
+    // MARK: Focus analysis
     var focusStatus: FocusStatus = .unanalyzed
     var focusScore: Double = 0
     var focusRegion: FocusResult.AnalysisRegion = .fullImage
@@ -71,18 +60,25 @@ struct RAWFile: Identifiable {
     var ratingBasis: FocusResult.RatingBasis = .fullImage
     var xmpWritten: Bool = false
 
-    // MARK: Perceptual hash
-    /// 64-bit perceptual hash computed from the embedded JPEG preview.
-    /// nil until computeSimilarGroups() has run. Used for near-duplicate detection.
+    // MARK: Exposure assessment — populated alongside focus analysis
+    var exposureAssessment: ExposureAssessment? = nil
+
+    // MARK: Perceptual hash — populated at load time
     var pHash: UInt64? = nil
 
-    // MARK: Pick status
+    // MARK: Species — populated by background pass
+    var speciesLabel: String? = nil
+    var speciesConfidence: Float? = nil
+    var speciesAnalyzed: Bool = false
+
+    // MARK: Pick / rating / label
     var pickStatus: PickStatus = .unpicked
     var pickIsOverridden: Bool = false
-
-    // MARK: Star rating & colour label
     var starRating: Int = 0
     var labelColour: LabelColour = .none
+
+    // MARK: Burst sharpness ranking — set by runBurstSharpnessRanking()
+    var isBurstSharpnessBest: Bool = false
 
     var isRejected: Bool { pickStatus == .rejected }
 }
@@ -92,97 +88,124 @@ extension RAWFile: Hashable, Equatable {
     func hash(into hasher: inout Hasher) { hasher.combine(id) }
 }
 
-// MARK: - Burst stack
+// MARK: - PhotoGroup
+//
+// A named group of related photos.
+// kind == .confirmedBurst : time-adjacent sequence (≤2 s between frames)
+// kind == .similar        : visually similar photos identified by pHash
 
-/// A group of RAWFile objects detected as a continuous burst sequence.
-/// `coverFile` is the first photo in the burst and is used as the stack thumbnail.
-struct BurstStack: Identifiable {
-    let id = UUID()
+struct PhotoGroup: Identifiable {
+    let id: UUID
     var files: [RAWFile]
+    var kind: Kind
+
+    enum Kind { case confirmedBurst, similar }
+
+    init(files: [RAWFile], kind: Kind, id: UUID = UUID()) {
+        self.id    = id
+        self.files = files
+        self.kind  = kind
+    }
 
     var coverFile: RAWFile { files[0] }
     var count: Int { files.count }
+    var isBurst:   Bool { if case .confirmedBurst = kind { return true }; return false }
+    var isSimilar: Bool { if case .similar        = kind { return true }; return false }
 }
 
-// MARK: - Grid item
+// MARK: - GridItem
+//
+// Used only by the "All" view in the grid.
+// Singles = photos not in any burst.
+// Groups  = burst stacks (similar groups are shown via a separate path).
 
-/// Represents one item in the top-level grid — either a single photo or a burst stack.
 enum GridItem: Identifiable {
     case single(RAWFile)
-    case stack(BurstStack)
+    case group(PhotoGroup)
 
     var id: UUID {
         switch self {
         case .single(let f): return f.id
-        case .stack(let s):  return s.id
+        case .group(let g):  return g.id
         }
     }
 }
 
-// MARK: - Supported RAW extensions
+// MARK: - Constants
+
+private let burstGapThreshold: TimeInterval = 2.0
+
+/// Session window for similar grouping. Photos further apart than this are
+/// never grouped as similar, regardless of visual appearance.
+private let sessionWindowSeconds: TimeInterval = 2 * 60 * 60   // 2 hours
 
 private let rawExtensions: Set<String> = [
     "raw", "arw", "cr2", "cr3", "nef", "nrw", "orf", "rw2",
     "pef", "raf", "srw", "dng", "3fr", "fff", "iiq", "rwl",
-    "mrw", "x3f", "erf", "kdc", "dcr", "mef", "mos", "ptx"
+    "mrw", "x3f", "erf", "kdc", "dcr", "mef", "mos", "ptx",
+    "tif", "tiff"
 ]
-
-/// Two photos are considered part of the same burst if their timestamps
-/// are within this many seconds of each other.
-private let burstGapThreshold: TimeInterval = 2.0
 
 // MARK: - SDCardManager
 
 @MainActor
 final class SDCardManager: ObservableObject {
-    /// Assigned once from ContentView.onAppear. The manager reads from this
-    /// directly whenever analysis runs, so it always sees current values.
+
     var settings: AppSettings?
 
     @Published var rawFiles: [RAWFile] = []
 
-    /// The grouped representation used by the top-level grid.
-    /// Solo photos appear as `.single`, burst groups as `.stack`.
-    /// Rebuilt automatically whenever `rawFiles` is set.
+    // ── Burst groups ─────────────────────────────────────────────────────────
+    // Built from timestamp proximity only. Independent of similarGroups.
+    // A photo can appear in both a burstGroup and a similarGroup simultaneously.
+    @Published var burstGroups: [PhotoGroup] = []
+
+    // ── Similar groups ───────────────────────────────────────────────────────
+    // Built from pHash comparison across all files. Independent of burstGroups.
+    @Published var similarGroups: [PhotoGroup] = []
+
+    // ── Species groups ───────────────────────────────────────────────────────
+    // One group per identified species, containing all photos of that species
+    // within the session window. Built from species labels, not pHash.
+    // Independent of burstGroups and similarGroups.
+    @Published var speciesGroups: [PhotoGroup] = []
+
+    // ── Grid items (All view) ────────────────────────────────────────────────
+    // Burst stacks shown as cards; singles shown flat.
+    // Similar and species groups have their own views.
     @Published var gridItems: [GridItem] = []
 
-    /// Groups of near-duplicate photos detected by perceptual hash comparison.
-    /// Only populated after computeSimilarGroups() has been called.
-    /// Each group contains 2+ files whose pHash Hamming distance is within
-    /// PHasher.similarityThreshold (≤10 differing bits out of 64).
-    @Published var similarGroups: [SimilarGroup] = []
+    // Species pass state
+    @Published var isAnalyzingSpecies: Bool   = false
+    @Published var speciesProgress:    Double = 0
 
-    /// True while pHash computation is running.
-    @Published var isComputingSimilar: Bool = false
+    // pHash pass state — shown during initial load
+    @Published var isComputingHashes: Bool   = false
+    @Published var hashProgress:      Double = 0
 
-    @Published var isSDCardMounted: Bool = false
-    @Published var isLoading: Bool = false
-    @Published var isAnalyzing: Bool = false
+    @Published var isSDCardMounted:  Bool   = false
+    @Published var isLoading:        Bool   = false
+    @Published var isAnalyzing:      Bool   = false
     @Published var analysisProgress: Double = 0
-    @Published var errorMessage: String?
+    @Published var errorMessage:     String?
 
-    /// Holds the security-scoped directory URL open for the lifetime of the session.
+    var burstPhotoCount:   Int { burstGroups.reduce(0)   { $0 + $1.count } }
+    var similarPhotoCount: Int { similarGroups.reduce(0)  { $0 + $1.count } }
+    var speciesPhotoCount: Int { speciesGroups.reduce(0)  { $0 + $1.count } }
+
     private var activeDirectoryURL: URL? {
-        didSet {
-            oldValue?.stopAccessingSecurityScopedResource()
-        }
+        didSet { oldValue?.stopAccessingSecurityScopedResource() }
     }
+    deinit { activeDirectoryURL?.stopAccessingSecurityScopedResource() }
 
-    deinit {
-        activeDirectoryURL?.stopAccessingSecurityScopedResource()
-    }
-
-    // MARK: Discovery
+    // MARK: - Discovery
 
     func refresh() {
         guard !isSDCardMounted else { return }
-        isLoading = true
-        errorMessage = nil
-
+        isLoading = true; errorMessage = nil
         Task {
             let found = scanForRAWFiles()
-            rawFiles = found
-            gridItems = groupIntoBursts(found)
+            await loadAndGroup(found)
             if !found.isEmpty { isSDCardMounted = true }
             isLoading = false
         }
@@ -191,128 +214,541 @@ final class SDCardManager: ObservableObject {
     func forceRefresh() {
         activeDirectoryURL = nil
         isSDCardMounted = false
-        rawFiles = []
-        gridItems = []
-        similarGroups = []
-        isLoading = true
-        errorMessage = nil
-
+        rawFiles = []; gridItems = []; burstGroups = []; similarGroups = []; speciesGroups = []
+        isLoading = true; errorMessage = nil
         Task {
             let found = scanForRAWFiles()
-            rawFiles = found
-            gridItems = groupIntoBursts(found)
+            await loadAndGroup(found)
             isSDCardMounted = !found.isEmpty || detectExternalVolumes()
             isLoading = false
         }
     }
 
-    /// Called by the document picker after the user selects a folder.
     func loadFilesFromDirectory(_ url: URL) {
         activeDirectoryURL = url
-        isLoading = true
-        errorMessage = nil
-
-        let found = collectRAWFiles(in: url)
+        isLoading = true; errorMessage = nil
+        let found  = collectRAWFiles(in: url)
         let sorted = found.sorted { $0.name < $1.name }
-
-        isSDCardMounted = true
-        rawFiles = sorted
-        gridItems = groupIntoBursts(sorted)
-        similarGroups = []
-        isLoading = false
-
+        isSDCardMounted = true; isLoading = false
         if found.isEmpty {
             errorMessage = "No RAW files found in the selected directory."
+            rawFiles = []; gridItems = []; burstGroups = []; similarGroups = []; speciesGroups = []
+            return
         }
+        Task { await loadAndGroup(sorted) }
     }
 
-    // MARK: Focus Analysis
+    // MARK: - Load pipeline
+    //
+    // Pass 1 — immediate:   compute pHash for every file.
+    //                       Publish rawFiles, burstGroups, similarGroups, gridItems.
+    // Pass 2 — background:  run species classification.
+    //                       Rebuild all groups progressively as results arrive.
+    // Pass 3 — on demand:   full focus analysis (user-initiated).
 
-    private var analysisCancelled = false
+    private func loadAndGroup(_ files: [RAWFile]) async {
+        // Publish files immediately so the grid appears with thumbnails.
+        // The user can browse while hashing and species ID run in the background.
+        rawFiles      = files
+        burstGroups   = buildBurstGroups(from: rawFiles)
+        similarGroups = []
+        speciesGroups = []
+        gridItems     = buildGridItems(from: rawFiles, bursts: burstGroups)
 
-    func cancelAnalysis() {
-        analysisCancelled = true
+        // Species pass runs automatically in the background.
+        // Similar groups are built on demand via computeSimilarGroups().
+        Task { await runSpeciesPass() }
     }
 
-    func analyzeAllFocus() async {
+    // MARK: - pHash / similar groups (on demand)
+    //
+    // Called explicitly by the user via the "Find Similar" toolbar button.
+    // Computes pHash for any files that don't have one yet, then rebuilds
+    // similar groups. Hashes are cached so re-running is fast.
+
+    func computeSimilarGroups() async {
         guard !rawFiles.isEmpty else { return }
-        isAnalyzing = true
-        analysisCancelled = false
-        analysisProgress = 0
+        isComputingHashes = true
+        hashProgress = 0
 
-        let sharpen = settings?.sharpenIntensity ?? 0.4
+        let total     = rawFiles.count
+        let batchSize = 16
 
-        let total = rawFiles.count
+        for batchStart in stride(from: 0, to: total, by: batchSize) {
+            let batchEnd = min(batchStart + batchSize, total)
+            let indices  = Array(batchStart..<batchEnd).filter { rawFiles[$0].pHash == nil }
+
+            if !indices.isEmpty {
+                let urls = indices.map { rawFiles[$0].url }
+                let hashes: [UInt64?] = await Task.detached(priority: .userInitiated) {
+                    urls.map { PHasher.hash(for: $0) }
+                }.value
+                for (offset, i) in indices.enumerated() {
+                    rawFiles[i].pHash = hashes[offset]
+                }
+            }
+
+            hashProgress = Double(batchEnd) / Double(total)
+        }
+
+        isComputingHashes = false
+        similarGroups = buildSimilarGroups(from: rawFiles)
+    }
+
+    // MARK: - Species pass
+
+    private var speciesCancelled = false
+    func cancelSpeciesAnalysis() { speciesCancelled = true }
+
+    private func runSpeciesPass() async {
+        guard !rawFiles.isEmpty else { return }
+        isAnalyzingSpecies = true
+        speciesCancelled   = false
+        speciesProgress    = 0
+
+        let total     = rawFiles.count
+        let threshold = Float(settings?.speciesConfidenceThreshold ?? 0.35)
         let batchSize = 4
 
         for batchStart in stride(from: 0, to: total, by: batchSize) {
-
-            // Stop between batches if the user cancelled
-            if analysisCancelled { break }
-
+            if speciesCancelled { break }
             let batchEnd = min(batchStart + batchSize, total)
-            let indices = Array(batchStart..<batchEnd)
+            let pending  = (batchStart..<batchEnd).filter { !rawFiles[$0].speciesAnalyzed }
 
-            await withTaskGroup(of: (Int, FocusResult).self) { group in
-                for i in indices {
-                    let url = rawFiles[i].url
-                    group.addTask {
-                        let result = await FocusAnalyzer.analyze(url: url, sharpenIntensity: sharpen)
-                        return (i, result)
+            if !pending.isEmpty {
+                await withTaskGroup(of: (Int, SpeciesResult).self) { group in
+                    for i in pending {
+                        let url = rawFiles[i].url
+                        group.addTask {
+                            (i, await SpeciesDetector.classify(url: url,
+                                                               confidenceThreshold: threshold))
+                        }
                     }
-                }
-                for await (i, result) in group {
-                    rawFiles[i].focusStatus           = result.status
-                    rawFiles[i].focusScore            = result.score
-                    rawFiles[i].focusRegion           = result.analysisRegion
-                    rawFiles[i].blurType              = result.blurType
-                    rawFiles[i].subjectSizeConfidence = result.subjectSizeConfidence
-                    rawFiles[i].detectedAnimalLabel   = result.detectedAnimalLabel
-                    rawFiles[i].analysisRect          = result.analysisRect
-                    rawFiles[i].subjectContour        = result.subjectContour
-                    rawFiles[i].detectionConfidence   = result.detectionConfidence
-                    rawFiles[i].afOverlapsSubject     = result.afOverlapsSubject
-                    rawFiles[i].rawSharpnessScore     = result.rawSharpnessScore
-                    rawFiles[i].subjectBodyArea       = result.subjectBodyArea
-                    rawFiles[i].scoringRectArea       = result.scoringRectArea
-                    rawFiles[i].hadAFPoint            = result.hadAFPoint
-                    rawFiles[i].sharpThreshold        = result.sharpThreshold
-                    rawFiles[i].acceptableThreshold   = result.acceptableThreshold
-                    rawFiles[i].afPointRawScore       = result.afPointRawScore
-                    rawFiles[i].subjectBodyRawScore   = result.subjectBodyRawScore
-                    rawFiles[i].ratingBasis           = result.ratingBasis
-                    if !rawFiles[i].pickIsOverridden {
-                        resetOutcomeFields(at: i)
-                        if let action = settings?.action(for: result.status) {
-                            applyOutcomeAction(action, to: i)
+                    for await (i, result) in group {
+                        let normLabel = result.label.map { SDCardManager.normaliseSpeciesLabel($0) }
+                        rawFiles[i].speciesLabel      = normLabel
+                        rawFiles[i].speciesConfidence = result.confidence
+                        rawFiles[i].speciesAnalyzed   = true
+                        if rawFiles[i].detectedAnimalLabel == nil {
+                            rawFiles[i].detectedAnimalLabel = normLabel
+                            rawFiles[i].detectionConfidence = result.confidence
                         }
                     }
                 }
             }
 
+            speciesProgress = Double(batchEnd) / Double(total)
+            // Only rebuild species groups per batch — burst groups and grid items
+            // do not depend on species labels so rebuilding them every 4 files
+            // is wasteful and causes SwiftUI churn that produces visible duplicates.
+            speciesGroups = buildSpeciesGroups(from: rawFiles)
+        }
+
+        isAnalyzingSpecies = false
+        // Full rebuild once at the end to pick up any species-driven changes.
+        rebuildAllGroups()
+        // Rank sharpness within each species burst. Only photos that have already
+        // had full focus analysis run will receive a crown — see runBurstSharpnessRanking().
+        runBurstSharpnessRanking()
+    }
+
+    // MARK: - Rebuild helper
+
+    private func rebuildAllGroups() {
+        burstGroups   = buildBurstGroups(from: rawFiles)
+        similarGroups = buildSimilarGroups(from: rawFiles)
+        speciesGroups = buildSpeciesGroups(from: rawFiles)
+        gridItems     = buildGridItems(from: rawFiles, bursts: burstGroups)
+    }
+
+    // MARK: - Label normalisation
+    //
+    // Species labels come from CoreML model identifiers which may use underscores,
+    // mixed case, or slightly different formatting between the load-time classifier
+    // and focus analysis. Normalise to a consistent display string and lookup key
+    // everywhere so the same species always maps to the same group.
+
+    /// Returns a display-ready species label: underscores replaced with spaces,
+    /// each word capitalised. e.g. "european_robin" → "European Robin".
+    static func normaliseSpeciesLabel(_ raw: String) -> String {
+        raw
+            .replacingOccurrences(of: "_", with: " ")
+            .trimmingCharacters(in: .whitespaces)
+            .split(separator: " ")
+            .map { $0.prefix(1).uppercased() + $0.dropFirst().lowercased() }
+            .joined(separator: " ")
+    }
+
+    /// Lowercase key for dictionary grouping — strips all whitespace variation.
+    private static func speciesKey(_ label: String) -> String {
+        normaliseSpeciesLabel(label).lowercased()
+    }
+
+    // MARK: - Burst grouping
+    //
+    // Pure time-based: consecutive files within burstGapThreshold seconds
+    // form a burst group. No pHash check — we trust the camera's timing.
+    // Species veto applied after grouping.
+
+    private func buildBurstGroups(from files: [RAWFile]) -> [PhotoGroup] {
+        let speciesThreshold = Float(settings?.speciesConfidenceThreshold ?? 0.35)
+
+        let sorted = files.sorted {
+            ($0.modificationDate ?? .distantFuture) < ($1.modificationDate ?? .distantFuture)
+        }
+
+        var rawGroups: [[RAWFile]] = []
+        var current: [RAWFile] = []
+
+        for file in sorted {
+            if current.isEmpty { current.append(file); continue }
+            let gap: TimeInterval = {
+                guard let d0 = current.last!.modificationDate,
+                      let d1 = file.modificationDate
+                else { return burstGapThreshold + 1 }
+                return d1.timeIntervalSince(d0)
+            }()
+            if gap <= burstGapThreshold { current.append(file) }
+            else { rawGroups.append(current); current = [file] }
+        }
+        if !current.isEmpty { rawGroups.append(current) }
+
+        // Keep only groups of 2+. Species veto temporarily disabled.
+        return rawGroups
+            .filter { $0.count >= 2 }
+            .map { PhotoGroup(files: $0, kind: .confirmedBurst) }
+    }
+
+    // MARK: - Similar grouping
+    //
+    // Pure pHash-based: every file compared against every other file.
+    // Two files are similar if:
+    //   • Their modification dates are within sessionWindowSeconds, AND
+    //   • Their pHash Hamming distance ≤ similarityThreshold.
+    //
+    // Grouping is seed-based (not Union-Find transitivity) to avoid chaining
+    // dissimilar photos through an intermediate bridge match.
+    //
+    // Species veto applied after grouping.
+    //
+    // Note: a file may appear in both a burstGroup and a similarGroup.
+    // The two arrays are completely independent.
+
+    private func buildSimilarGroups(from files: [RAWFile]) -> [PhotoGroup] {
+        let threshold = settings?.similarityThreshold ?? PHasher.defaultSimilarityThreshold
+
+        // Only files with a hash are candidates, sorted by date.
+        let candidates = files
+            .filter { $0.pHash != nil }
+            .sorted { ($0.modificationDate ?? .distantFuture) < ($1.modificationDate ?? .distantFuture) }
+        let m = candidates.count
+        guard m >= 2 else { return [] }
+
+        // Union-Find over candidate indices.
+        // Two files are connected if they are within the session window AND
+        // their pHash distance is within the threshold.
+        // Union-Find transitivity is correct here: if A~B and B~C then A, B, C
+        // are genuinely related — they form a chain of visually similar photos.
+        // The session window prevents unrelated photos from different days linking.
+        var parent = Array(0..<m)
+
+        func find(_ x: Int) -> Int {
+            var x = x
+            while parent[x] != x { parent[x] = parent[parent[x]]; x = parent[x] }
+            return x
+        }
+        func union(_ a: Int, _ b: Int) {
+            let ra = find(a), rb = find(b)
+            if ra != rb { parent[ra] = rb }
+        }
+
+        for i in 0..<m {
+            guard let hi = candidates[i].pHash,
+                  let di = candidates[i].modificationDate else { continue }
+            for j in (i+1)..<m {
+                guard let hj = candidates[j].pHash,
+                      let dj = candidates[j].modificationDate,
+                      abs(di.timeIntervalSince(dj)) <= sessionWindowSeconds,
+                      PHasher.hammingDistance(hi, hj) <= threshold
+                else { continue }
+                union(i, j)
+            }
+        }
+
+        // Collect clusters by root index.
+        var clusters: [Int: [RAWFile]] = [:]
+        for i in 0..<m {
+            clusters[find(i), default: []].append(candidates[i])
+        }
+
+        // Species veto temporarily disabled.
+        return clusters.values
+            .filter { $0.count >= 2 }
+            .map { group in
+                let sorted = group.sorted {
+                    ($0.modificationDate ?? .distantFuture) < ($1.modificationDate ?? .distantFuture)
+                }
+                return PhotoGroup(files: sorted, kind: .similar)
+            }
+            .sorted { ($0.coverFile.modificationDate ?? .distantPast) > ($1.coverFile.modificationDate ?? .distantPast) }
+    }
+
+    // MARK: - Species grouping
+    //
+    // Groups photos by their identified species label.
+    // One PhotoGroup per species, containing every photo of that species
+    // whose modification date falls within the session window of the first
+    // photo of that species shot that day.
+    //
+    // This is semantically more meaningful than pHash for wildlife photography:
+    // "show me all my Robin shots" is a useful cull group.
+    //
+    // Photos with no confident species label are excluded entirely.
+    // A photo may appear in both a speciesGroup and a burstGroup or similarGroup.
+
+    private func buildSpeciesGroups(from files: [RAWFile]) -> [PhotoGroup] {
+        let speciesThreshold = Float(settings?.speciesConfidenceThreshold ?? 0.35)
+
+        // Collect all files that have a confident species label.
+        let labelled = files.filter { file in
+            guard let conf = file.speciesConfidence else { return false }
+            return conf >= speciesThreshold && file.speciesLabel != nil
+        }
+        guard !labelled.isEmpty else { return [] }
+
+        // Group by normalised species key (lowercased, underscores → spaces).
+        var bySpecies: [String: [RAWFile]] = [:]
+        for file in labelled {
+            let key = SDCardManager.speciesKey(file.speciesLabel!)
+            bySpecies[key, default: []].append(file)
+        }
+
+
+        // Expand each species group to include burst companions.
+        // A burst companion is time-adjacent (within burstGapThreshold) to a labelled
+        // file in the group AND either has no species label, or has the SAME species.
+        // This prevents jackdaw-labelled files bleeding into grey heron groups etc.
+        let allFilesSorted = files.sorted {
+            ($0.modificationDate ?? .distantFuture) < ($1.modificationDate ?? .distantFuture)
+        }
+
+        var expandedBySpecies: [String: Set<UUID>] = [:]
+
+        for (species, labelledFiles) in bySpecies {
+            var ids = Set(labelledFiles.map { $0.id })
+
+            for labelled in labelledFiles {
+                guard let pos = allFilesSorted.firstIndex(where: { $0.id == labelled.id })
+                else { continue }
+
+                // Walk backwards
+                var i = pos - 1
+                while i >= 0 {
+                    let candidate = allFilesSorted[i]
+                    guard let dPrev = candidate.modificationDate,
+                          let dNext = allFilesSorted[i + 1].modificationDate,
+                          abs(dNext.timeIntervalSince(dPrev)) <= burstGapThreshold
+                    else { break }
+                    // Only include if no conflicting species label.
+                    let candidateKey = candidate.speciesLabel.map { SDCardManager.speciesKey($0) }
+                    if let ck = candidateKey, ck != species { break }
+                    ids.insert(candidate.id)
+                    i -= 1
+                }
+
+                // Walk forwards
+                var j = pos + 1
+                while j < allFilesSorted.count {
+                    let candidate = allFilesSorted[j]
+                    guard let dThis = candidate.modificationDate,
+                          let dPrev = allFilesSorted[j - 1].modificationDate,
+                          abs(dThis.timeIntervalSince(dPrev)) <= burstGapThreshold
+                    else { break }
+                    let candidateKey = candidate.speciesLabel.map { SDCardManager.speciesKey($0) }
+                    if let ck = candidateKey, ck != species { break }
+                    ids.insert(candidate.id)
+                    j += 1
+                }
+            }
+
+            expandedBySpecies[species] = ids
+        }
+
+        // Build final PhotoGroups from the expanded ID sets.
+        let fileByID = Dictionary(uniqueKeysWithValues: files.map { ($0.id, $0) })
+
+        // Use a deterministic ID derived from the species key so that rebuilding
+        // the same species group always produces the same ID. SwiftUI uses this to
+        // decide whether to animate or replace a cell — a stable ID prevents
+        // phantom duplicates appearing during the progressive species pass rebuilds.
+        return expandedBySpecies
+            .compactMap { (speciesKey, ids) -> PhotoGroup? in
+                let groupFiles = ids.compactMap { fileByID[$0] }
+                    .sorted { ($0.modificationDate ?? .distantFuture) < ($1.modificationDate ?? .distantFuture) }
+                guard groupFiles.count >= 1 else { return nil }
+                let stableID = SDCardManager.deterministicUUID(for: speciesKey)
+                return PhotoGroup(files: groupFiles, kind: .similar, id: stableID)
+            }
+            .sorted { $0.count > $1.count }   // most photos first
+    }
+
+    /// Produces a deterministic UUID from a string by hashing it.
+    /// The same string always produces the same UUID, making SwiftUI list IDs
+    /// stable across rebuilds of species groups.
+    private static func deterministicUUID(for string: String) -> UUID {
+        // Use a simple DJB2 hash to produce 16 bytes deterministically.
+        var h1: UInt64 = 5381
+        var h2: UInt64 = 0x9e3779b97f4a7c15
+        for scalar in string.unicodeScalars {
+            h1 = (h1 &<< 5) &+ h1 &+ UInt64(scalar.value)
+            h2 = (h2 ^ UInt64(scalar.value)) &* 0x9e3779b97f4a7c15
+        }
+        // Pack h1 and h2 into 16 bytes for a UUID.
+        return UUID(uuid: (
+            UInt8(h1 & 0xFF), UInt8((h1 >> 8) & 0xFF),
+            UInt8((h1 >> 16) & 0xFF), UInt8((h1 >> 24) & 0xFF),
+            UInt8((h1 >> 32) & 0xFF), UInt8((h1 >> 40) & 0xFF),
+            UInt8((h1 >> 48) & 0xFF), UInt8((h1 >> 56) & 0xFF),
+            UInt8(h2 & 0xFF), UInt8((h2 >> 8) & 0xFF),
+            UInt8((h2 >> 16) & 0xFF), UInt8((h2 >> 24) & 0xFF),
+            UInt8((h2 >> 32) & 0xFF), UInt8((h2 >> 40) & 0xFF),
+            UInt8((h2 >> 48) & 0xFF), UInt8((h2 >> 56) & 0xFF)
+        ))
+    }
+
+    // MARK: - Grid items (All view)
+    //
+    // Burst groups appear as stacked cards; photos not in any burst appear as singles.
+    // Similar and species groups have their own filtered views.
+
+    private func buildGridItems(from files: [RAWFile],
+                                bursts: [PhotoGroup]) -> [GridItem] {
+        // Which file IDs are in a burst group?
+        let burstFileIDs = Set(bursts.flatMap { $0.files.map { $0.id } })
+
+        // Files sorted by date for consistent ordering.
+        let sorted = files.sorted {
+            ($0.modificationDate ?? .distantFuture) < ($1.modificationDate ?? .distantFuture)
+        }
+
+        var items: [GridItem] = []
+        var emittedIDs = Set<UUID>()
+
+        for file in sorted {
+            guard !emittedIDs.contains(file.id) else { continue }
+
+            if burstFileIDs.contains(file.id),
+               let group = bursts.first(where: { $0.files.contains { $0.id == file.id } }) {
+                // Emit the whole burst group once (keyed on cover file).
+                if !emittedIDs.contains(group.coverFile.id) {
+                    items.append(.group(group))
+                    group.files.forEach { emittedIDs.insert($0.id) }
+                }
+            } else {
+                items.append(.single(file))
+                emittedIDs.insert(file.id)
+            }
+        }
+        return items
+    }
+
+    // MARK: - Species veto
+    //
+    // Splits a flat file array into sub-arrays wherever confident species labels
+    // conflict. Files with no confident label are neutral — never trigger a split.
+
+    private func applySpeciesVeto(to files: [RAWFile],
+                                   kind: PhotoGroup.Kind,
+                                   threshold: Float) -> [[RAWFile]] {
+        func label(_ f: RAWFile) -> String? {
+            guard let l = f.speciesLabel, let c = f.speciesConfidence, c >= threshold
+            else { return nil }
+            return l.lowercased()
+        }
+
+        // Pass 1: find the dominant species (most frequent confident label).
+        // Files with no confident label are neutral and do not vote.
+        var counts: [String: Int] = [:]
+        for file in files {
+            if let lbl = label(file) { counts[lbl, default: 0] += 1 }
+        }
+        let dominant = counts.max(by: { $0.value < $1.value })?.key
+
+        // If no file has a confident label, or all confident labels agree,
+        // no split is needed — return the group unchanged.
+        if counts.count <= 1 { return [files] }
+
+        // Pass 2: separate files whose confident label CONFLICTS with the dominant
+        // species into their own buckets. Files with no confident label stay with
+        // the dominant group (neutral). Files with a minority confident label that
+        // differs from dominant form their own groups.
+        var dominantGroup: [RAWFile] = []
+        var minorityGroups: [String: [RAWFile]] = [:]
+
+        for file in files {
+            if let lbl = label(file), lbl != dominant {
+                minorityGroups[lbl, default: []].append(file)
+            } else {
+                // No confident label (neutral) or matches dominant — stays in main group.
+                dominantGroup.append(file)
+            }
+        }
+
+        var result: [[RAWFile]] = []
+        if !dominantGroup.isEmpty { result.append(dominantGroup) }
+        for (_, group) in minorityGroups.sorted(by: { $0.key < $1.key }) {
+            result.append(group)
+        }
+        return result
+    }
+
+    // MARK: - Focus Analysis (user-initiated)
+
+    private var analysisCancelled = false
+    func cancelAnalysis() { analysisCancelled = true }
+
+    func analyzeAllFocus() async {
+        guard !rawFiles.isEmpty else { return }
+        isAnalyzing = true; analysisCancelled = false; analysisProgress = 0
+        let sharpen = settings?.sharpenIntensity ?? 0.4
+        let total = rawFiles.count
+
+        for batchStart in stride(from: 0, to: total, by: 4) {
+            if analysisCancelled { break }
+            let batchEnd = min(batchStart + 4, total)
+            await withTaskGroup(of: (Int, FocusResult).self) { group in
+                for i in batchStart..<batchEnd {
+                    let url = rawFiles[i].url
+                    group.addTask { (i, await FocusAnalyzer.analyze(url: url,
+                                                                     sharpenIntensity: sharpen)) }
+                }
+                for await (i, result) in group { applyFocusResult(result, to: i) }
+            }
             analysisProgress = Double(batchEnd) / Double(total)
         }
 
-        isAnalyzing = false
-        analysisCancelled = false
-
-        // Rebuild gridItems so stack cover photos reflect updated analysis state
-        gridItems = groupIntoBursts(rawFiles)
+        isAnalyzing = false; analysisCancelled = false
+        rebuildAllGroups()
+        // Re-rank sharpness now that full focus scores are available.
+        runBurstSharpnessRanking()
     }
 
     func analyzeFocus(for file: RAWFile) async {
         guard let idx = rawFiles.firstIndex(where: { $0.id == file.id }) else { return }
-        let result = await FocusAnalyzer.analyze(url: file.url,
-                                                  sharpenIntensity: settings?.sharpenIntensity ?? 0.4)
+        let result = await FocusAnalyzer.analyze(
+            url: file.url, sharpenIntensity: settings?.sharpenIntensity ?? 0.4)
+        applyFocusResult(result, to: idx)
+        rebuildAllGroups()
+    }
+
+    private func applyFocusResult(_ result: FocusResult, to idx: Int) {
         rawFiles[idx].focusStatus           = result.status
         rawFiles[idx].focusScore            = result.score
         rawFiles[idx].focusRegion           = result.analysisRegion
         rawFiles[idx].blurType              = result.blurType
         rawFiles[idx].subjectSizeConfidence = result.subjectSizeConfidence
-        rawFiles[idx].detectedAnimalLabel   = result.detectedAnimalLabel
         rawFiles[idx].analysisRect          = result.analysisRect
         rawFiles[idx].subjectContour        = result.subjectContour
-        rawFiles[idx].detectionConfidence   = result.detectionConfidence
         rawFiles[idx].afOverlapsSubject     = result.afOverlapsSubject
         rawFiles[idx].afNotOnSubject        = result.afNotOnSubject
         rawFiles[idx].rawSharpnessScore     = result.rawSharpnessScore
@@ -324,135 +760,27 @@ final class SDCardManager: ObservableObject {
         rawFiles[idx].afPointRawScore       = result.afPointRawScore
         rawFiles[idx].subjectBodyRawScore   = result.subjectBodyRawScore
         rawFiles[idx].ratingBasis           = result.ratingBasis
+        rawFiles[idx].exposureAssessment    = result.exposureAssessment
+        if let newLabel = result.detectedAnimalLabel {
+            let normLabel = SDCardManager.normaliseSpeciesLabel(newLabel)
+            let newConf = result.detectionConfidence ?? 0
+            let oldConf = rawFiles[idx].detectionConfidence ?? 0
+            if newConf >= oldConf {
+                rawFiles[idx].detectedAnimalLabel = normLabel
+                rawFiles[idx].detectionConfidence = result.detectionConfidence
+                rawFiles[idx].speciesLabel        = normLabel
+                rawFiles[idx].speciesConfidence   = result.detectionConfidence
+            }
+        }
         if !rawFiles[idx].pickIsOverridden {
             resetOutcomeFields(at: idx)
             if let action = settings?.action(for: result.status) {
                 applyOutcomeAction(action, to: idx)
             }
         }
-        gridItems = groupIntoBursts(rawFiles)
     }
 
     var rejectedCount: Int { rawFiles.filter { $0.pickStatus == .rejected }.count }
-
-    // MARK: - Similar photo detection (pHash)
-
-    /// Compute perceptual hashes for all files, then group near-duplicates.
-    ///
-    /// How it works:
-    ///   1. For each file, load its embedded JPEG preview and compute a 64-bit pHash.
-    ///      This is fast — it uses the same small thumbnail already loaded for focus
-    ///      analysis, not the full RAW data.
-    ///   2. Compare every pair of hashes. Two files are "similar" if their Hamming
-    ///      distance (number of differing bits) is ≤ PHasher.similarityThreshold (10).
-    ///   3. Use Union-Find to merge overlapping pairs into groups, so that if A≈B and
-    ///      B≈C, all three end up in the same group even if A and C are not directly
-    ///      compared as similar.
-    ///   4. Publish the resulting groups as `similarGroups`.
-    ///
-    /// Call this once after files are loaded (or after the user requests it).
-    /// Hashes are cached in rawFiles[i].pHash so re-grouping after label changes
-    /// does not require re-hashing from disk.
-    func computeSimilarGroups() async {
-        guard !rawFiles.isEmpty else { return }
-        isComputingSimilar = true
-
-        let total = rawFiles.count
-        let threshold = settings?.similarityThreshold ?? PHasher.defaultSimilarityThreshold
-
-        // ── Step 1: compute hashes (skip files that already have one) ────────
-        // Hashing is pure CPU work with no Swift concurrency contention on
-        // rawFiles, so we compute off-MainActor and write results back in bulk.
-        let urls: [(index: Int, url: URL)] = rawFiles.indices.compactMap { i in
-            rawFiles[i].pHash == nil ? (i, rawFiles[i].url) : nil
-        }
-
-        // Compute hashes off the main thread in a detached task to avoid
-        // blocking the UI. Results come back as (index, hash?) pairs.
-        let hashes: [(Int, UInt64?)] = await Task.detached(priority: .userInitiated) {
-            urls.map { (idx, url) in (idx, PHasher.hash(for: url)) }
-        }.value
-
-        for (idx, hash) in hashes {
-            rawFiles[idx].pHash = hash
-        }
-
-        // ── Step 2: collect (index, hash) for files that have a valid hash ───
-        let indexed: [(index: Int, hash: UInt64)] = rawFiles.indices.compactMap { i in
-            guard let h = rawFiles[i].pHash else { return nil }
-            return (i, h)
-        }
-
-        // ── Step 3: Union-Find to cluster similar pairs ──────────────────────
-        //
-        // Union-Find (also called Disjoint Set Union) is a data structure that
-        // efficiently groups items into clusters. Think of it as labelling each
-        // photo with a "group representative": when we find two similar photos
-        // we merge their groups by pointing one representative at the other.
-        //
-        // parent[i] = the index of i's group representative (starts as itself).
-        // find(i) follows the chain until it reaches a self-referencing root.
-        // union(a, b) merges the two groups that a and b belong to.
-
-        var parent = Array(0..<total)
-
-        func find(_ x: Int) -> Int {
-            // Path compression: point every node directly to the root
-            // so future lookups are faster.
-            var x = x
-            while parent[x] != x {
-                parent[x] = parent[parent[x]]
-                x = parent[x]
-            }
-            return x
-        }
-
-        func union(_ a: Int, _ b: Int) {
-            let ra = find(a), rb = find(b)
-            if ra != rb { parent[ra] = rb }
-        }
-
-        // Compare every pair. O(N²) in the number of files.
-        // For a typical SD card of a few hundred photos this is fast (microseconds
-        // per comparison). For very large sets (1000+) a hash-bucket approach
-        // would be faster, but is not needed here.
-        for i in 0..<indexed.count {
-            for j in (i + 1)..<indexed.count {
-                let dist = PHasher.hammingDistance(indexed[i].hash, indexed[j].hash)
-                if dist <= threshold {
-                    union(indexed[i].index, indexed[j].index)
-                }
-            }
-        }
-
-        // ── Step 4: collect groups of size ≥ 2 ──────────────────────────────
-        // Build a dictionary: root index → [RAWFile]
-        var clusters: [Int: [RAWFile]] = [:]
-        for (fileIndex, _) in indexed {
-            let root = find(fileIndex)
-            clusters[root, default: []].append(rawFiles[fileIndex])
-        }
-
-        // Keep only groups with 2+ members; sort each group by modification date.
-        let groups: [SimilarGroup] = clusters.values
-            .filter { $0.count >= 2 }
-            .map { files in
-                let sorted = files.sorted {
-                    ($0.modificationDate ?? .distantFuture) < ($1.modificationDate ?? .distantFuture)
-                }
-                return SimilarGroup(files: sorted)
-            }
-            // Sort groups so the one with the most members appears first.
-            .sorted { $0.count > $1.count }
-
-        similarGroups = groups
-        isComputingSimilar = false
-    }
-
-    /// Total number of individual photos that appear in at least one similar group.
-    var similarPhotoCount: Int {
-        similarGroups.reduce(0) { $0 + $1.count }
-    }
 
     // MARK: - Pick / rating / label setters
 
@@ -460,52 +788,46 @@ final class SDCardManager: ObservableObject {
         guard let idx = rawFiles.firstIndex(where: { $0.id == file.id }) else { return }
         rawFiles[idx].pickStatus = status
         rawFiles[idx].pickIsOverridden = (status != .unpicked)
-        gridItems = groupIntoBursts(rawFiles)
+        rebuildAllGroups()
     }
 
-    /// Set the same pick status on every file in a burst stack.
-    func setPickStatus(_ status: PickStatus, forAllIn stack: BurstStack) {
-        for file in stack.files {
+    func setPickStatus(_ status: PickStatus, forAllIn group: PhotoGroup) {
+        for file in group.files {
             guard let idx = rawFiles.firstIndex(where: { $0.id == file.id }) else { continue }
             rawFiles[idx].pickStatus = status
             rawFiles[idx].pickIsOverridden = (status != .unpicked)
         }
-        gridItems = groupIntoBursts(rawFiles)
+        rebuildAllGroups()
     }
 
     func setStarRating(_ rating: Int, for file: RAWFile) {
         guard let idx = rawFiles.firstIndex(where: { $0.id == file.id }) else { return }
         rawFiles[idx].starRating = min(max(rating, 0), 5)
-        gridItems = groupIntoBursts(rawFiles)
+        rebuildAllGroups()
     }
 
-    /// Set the same star rating on every file in a burst stack.
-    func setStarRating(_ rating: Int, forAllIn stack: BurstStack) {
-        for file in stack.files {
+    func setStarRating(_ rating: Int, forAllIn group: PhotoGroup) {
+        for file in group.files {
             guard let idx = rawFiles.firstIndex(where: { $0.id == file.id }) else { continue }
             rawFiles[idx].starRating = min(max(rating, 0), 5)
         }
-        gridItems = groupIntoBursts(rawFiles)
+        rebuildAllGroups()
     }
 
     func setLabelColour(_ colour: LabelColour, for file: RAWFile) {
         guard let idx = rawFiles.firstIndex(where: { $0.id == file.id }) else { return }
         rawFiles[idx].labelColour = colour
-        gridItems = groupIntoBursts(rawFiles)
+        rebuildAllGroups()
     }
 
-    /// Set the same colour label on every file in a burst stack.
-    func setLabelColour(_ colour: LabelColour, forAllIn stack: BurstStack) {
-        for file in stack.files {
+    func setLabelColour(_ colour: LabelColour, forAllIn group: PhotoGroup) {
+        for file in group.files {
             guard let idx = rawFiles.firstIndex(where: { $0.id == file.id }) else { continue }
             rawFiles[idx].labelColour = colour
         }
-        gridItems = groupIntoBursts(rawFiles)
+        rebuildAllGroups()
     }
 
-    // MARK: - Batch setters for arbitrary file sets (used by multi-selection)
-
-    /// Clear all flags, star ratings, and colour labels on every file.
     func resetAllLabels() {
         for idx in rawFiles.indices {
             rawFiles[idx].pickStatus = .unpicked
@@ -513,35 +835,32 @@ final class SDCardManager: ObservableObject {
             rawFiles[idx].starRating = 0
             rawFiles[idx].labelColour = .none
         }
-        gridItems = groupIntoBursts(rawFiles)
+        rebuildAllGroups()
     }
 
-    /// Apply a pick status to every file in the supplied array.
     func setPickStatus(_ status: PickStatus, forFiles files: [RAWFile]) {
         for file in files {
             guard let idx = rawFiles.firstIndex(where: { $0.id == file.id }) else { continue }
             rawFiles[idx].pickStatus = status
             rawFiles[idx].pickIsOverridden = (status != .unpicked)
         }
-        gridItems = groupIntoBursts(rawFiles)
+        rebuildAllGroups()
     }
 
-    /// Apply a star rating to every file in the supplied array.
     func setStarRating(_ rating: Int, forFiles files: [RAWFile]) {
         for file in files {
             guard let idx = rawFiles.firstIndex(where: { $0.id == file.id }) else { continue }
             rawFiles[idx].starRating = min(max(rating, 0), 5)
         }
-        gridItems = groupIntoBursts(rawFiles)
+        rebuildAllGroups()
     }
 
-    /// Apply a colour label to every file in the supplied array.
     func setLabelColour(_ colour: LabelColour, forFiles files: [RAWFile]) {
         for file in files {
             guard let idx = rawFiles.firstIndex(where: { $0.id == file.id }) else { continue }
             rawFiles[idx].labelColour = colour
         }
-        gridItems = groupIntoBursts(rawFiles)
+        rebuildAllGroups()
     }
 
     func markXMPWritten(for file: RAWFile) {
@@ -549,96 +868,106 @@ final class SDCardManager: ObservableObject {
         rawFiles[idx].xmpWritten = true
     }
 
-    // MARK: - XMP sidecar writing
+    // MARK: - XMP
 
     func writeXMP(for file: RAWFile) {
         guard let idx = rawFiles.firstIndex(where: { $0.id == file.id }) else { return }
         do {
             try XMPSidecarWriter.write(for: file)
             rawFiles[idx].xmpWritten = true
-        } catch {
-            errorMessage = error.localizedDescription
-        }
+        } catch { errorMessage = error.localizedDescription }
     }
 
     func writeXMPBatch() -> String {
         let eligible = rawFiles.filter { $0.detectedAnimalLabel != nil }
         let result   = XMPSidecarWriter.writeBatch(for: eligible)
-
         for i in rawFiles.indices {
             if rawFiles[i].detectedAnimalLabel != nil && !rawFiles[i].xmpWritten {
                 rawFiles[i].xmpWritten = XMPSidecarWriter.sidecarExists(for: rawFiles[i])
             }
         }
-
         var summary = "\(result.written) XMP file(s) written"
-        if result.skipped > 0 { summary += ", \(result.skipped) skipped (no species)" }
+        if result.skipped > 0     { summary += ", \(result.skipped) skipped (no species)" }
         if !result.errors.isEmpty { summary += ", \(result.errors.count) error(s)" }
         return summary
     }
 
-    // MARK: - Burst grouping
+    // MARK: - Burst sharpness ranking
+    //
+    // Runs automatically after species grouping completes and after any full
+    // focus analysis batch. For every species burst (2+ time-adjacent photos
+    // of the same species), finds the photo with the highest focusScore and
+    // marks it isBurstSharpnessBest = true. All other photos in that burst
+    // are set to false.
+    //
+    // Only fully-analysed photos (focusStatus != .unanalyzed) are candidates.
+    // A burst needs at least 2 analysed photos for any crown to be awarded.
+    // Rejected photos are excluded from contention entirely.
+    //
+    // Tie-breaking order:
+    //   1. focusScore (higher wins)
+    //   2. afOverlapsSubject (true wins)
+    //   3. rawSharpnessScore (higher wins)
+    //   4. burst order (earlier photo wins)
 
-    /// Groups a sorted array of RAWFiles into GridItems by comparing consecutive
-    /// modification timestamps. Files within `burstGapThreshold` seconds of the
-    /// previous file are considered part of the same burst.
-    ///
-    /// The input should already be sorted by name (which for Canon files is also
-    /// chronological order). A secondary sort by modificationDate is applied here
-    /// to ensure correctness regardless of how the files were originally sorted.
-    private func groupIntoBursts(_ files: [RAWFile]) -> [GridItem] {
-        // Sort by modification date so timestamp comparison is meaningful.
-        // Files without a date sort to the end and are treated as solo items.
-        let sorted = files.sorted {
-            let d0 = $0.modificationDate ?? .distantFuture
-            let d1 = $1.modificationDate ?? .distantFuture
-            return d0 < d1
+    private func runBurstSharpnessRanking() {
+        // Reset all flags so every run starts clean.
+        for i in rawFiles.indices {
+            rawFiles[i].isBurstSharpnessBest = false
         }
 
-        var result: [GridItem] = []
-        var currentGroup: [RAWFile] = []
+        for group in speciesGroups {
+            // Resolve live copies from rawFiles (the group holds snapshots).
+            let sorted = group.files
+                .compactMap { file in rawFiles.first { $0.id == file.id } }
+                .sorted { ($0.modificationDate ?? .distantFuture) < ($1.modificationDate ?? .distantFuture) }
 
-        for file in sorted {
-            if currentGroup.isEmpty {
-                // Start the first group
-                currentGroup.append(file)
-            } else {
-                // modificationDate is now a stored let — safe to access repeatedly.
-                // If either date is missing, treat as a gap > threshold (no grouping).
-                let gap: TimeInterval
-                if let last = currentGroup.last!.modificationDate,
-                   let this = file.modificationDate {
-                    gap = this.timeIntervalSince(last)
-                } else {
-                    gap = burstGapThreshold + 1  // force a new group
+            // Split the species group into individual time-adjacent bursts.
+            var bursts: [[RAWFile]] = []
+            var current: [RAWFile] = []
+            for file in sorted {
+                if current.isEmpty { current.append(file); continue }
+                let gap: TimeInterval = {
+                    guard let a = current.last!.modificationDate,
+                          let b = file.modificationDate
+                    else { return burstGapThreshold + 1 }
+                    return b.timeIntervalSince(a)
+                }()
+                if gap <= burstGapThreshold { current.append(file) }
+                else { bursts.append(current); current = [file] }
+            }
+            if !current.isEmpty { bursts.append(current) }
+
+            for burst in bursts {
+                // Only rank fully-analysed, non-rejected photos.
+                let candidates = burst.filter {
+                    $0.pickStatus != .rejected && $0.focusStatus != .unanalyzed
+                }
+                // Need at least 2 analysed photos for the comparison to be meaningful.
+                guard candidates.count >= 2 else { continue }
+
+                let best = candidates.max { a, b in
+                    // 1. focusScore
+                    if a.focusScore != b.focusScore { return a.focusScore < b.focusScore }
+                    // 2. AF point on subject
+                    let afA = a.afOverlapsSubject ?? false
+                    let afB = b.afOverlapsSubject ?? false
+                    if afA != afB { return !afA }
+                    // 3. rawSharpnessScore
+                    if a.rawSharpnessScore != b.rawSharpnessScore {
+                        return a.rawSharpnessScore < b.rawSharpnessScore
+                    }
+                    // 4. Earlier in burst wins (treat later date as "worse")
+                    let da = a.modificationDate ?? .distantFuture
+                    let db = b.modificationDate ?? .distantFuture
+                    return da > db
                 }
 
-                if gap <= burstGapThreshold {
-                    // Within threshold — same burst
-                    currentGroup.append(file)
-                } else {
-                    // Gap too large — save current group and start a new one
-                    result.append(gridItem(from: currentGroup))
-                    currentGroup = [file]
+                if let best = best,
+                   let idx = rawFiles.firstIndex(where: { $0.id == best.id }) {
+                    rawFiles[idx].isBurstSharpnessBest = true
                 }
             }
-        }
-
-        // Don't forget the last group
-        if !currentGroup.isEmpty {
-            result.append(gridItem(from: currentGroup))
-        }
-
-        return result
-    }
-
-    /// Converts a group of files into the appropriate GridItem.
-    /// A group of 1 is always a solo item. A group of 2+ becomes a stack.
-    private func gridItem(from group: [RAWFile]) -> GridItem {
-        if group.count == 1 {
-            return .single(group[0])
-        } else {
-            return .stack(BurstStack(files: group))
         }
     }
 
@@ -650,9 +979,8 @@ final class SDCardManager: ObservableObject {
             includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey],
             options: [.skipsHiddenFiles]
         ) else { return [] }
-
-        let allURLs = enumerator.compactMap { $0 as? URL }
-        return allURLs
+        return enumerator
+            .compactMap { $0 as? URL }
             .filter { rawExtensions.contains($0.pathExtension.lowercased()) }
             .map { RAWFile(url: $0) }
     }
@@ -662,13 +990,10 @@ final class SDCardManager: ObservableObject {
         let volumesURL = URL(fileURLWithPath: "/Volumes", isDirectory: true)
         if let vols = try? FileManager.default.contentsOfDirectory(
             at: volumesURL, includingPropertiesForKeys: nil, options: .skipsHiddenFiles
-        ) {
-            for vol in vols { results += collectRAWFiles(in: vol) }
-        }
+        ) { for vol in vols { results += collectRAWFiles(in: vol) } }
         if let dcim = FileManager.default
             .urls(for: .documentDirectory, in: .userDomainMask).first?
-            .deletingLastPathComponent()
-            .appendingPathComponent("Media/DCIM") {
+            .deletingLastPathComponent().appendingPathComponent("Media/DCIM") {
             results += collectRAWFiles(in: dcim)
         }
         return results
@@ -681,22 +1006,15 @@ final class SDCardManager: ObservableObject {
     }
 
     private func applyOutcomeAction(_ action: FocusOutcomeAction, to idx: Int) {
-        if action.pick != .unpicked {
-            rawFiles[idx].pickStatus = action.pick
-        }
-        if action.stars > 0 {
-            rawFiles[idx].starRating = action.stars
-        }
-        if action.colour != .none {
-            rawFiles[idx].labelColour = action.colour
-        }
+        if action.pick   != .unpicked { rawFiles[idx].pickStatus  = action.pick }
+        if action.stars  >  0        { rawFiles[idx].starRating  = action.stars }
+        if action.colour != .none    { rawFiles[idx].labelColour = action.colour }
     }
 
     private func detectExternalVolumes() -> Bool {
         let volumesURL = URL(fileURLWithPath: "/Volumes", isDirectory: true)
         let contents = try? FileManager.default.contentsOfDirectory(
-            at: volumesURL, includingPropertiesForKeys: nil, options: .skipsHiddenFiles
-        )
+            at: volumesURL, includingPropertiesForKeys: nil, options: .skipsHiddenFiles)
         return !(contents?.isEmpty ?? true)
     }
 }
