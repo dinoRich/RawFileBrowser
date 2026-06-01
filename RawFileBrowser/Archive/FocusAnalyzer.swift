@@ -296,6 +296,7 @@ struct FocusAnalyzer {
                         sharpThreshold:      Double = 0.62,
                         acceptableThreshold: Double = 0.32) async -> FocusResult {
 
+        let _fn = url.lastPathComponent
         // Step 1 — AF point from camera Makernote
         let afRegion    = extractAFRegion(from: url,
                                           imageWidth: cgImage.width,
@@ -316,10 +317,15 @@ struct FocusAnalyzer {
                                       subjectRect: subject.bodyRect ?? subject.bestRect)
 
         // Step 5 — Route to the correct analysis path
+        let _tr = Date()
         var result = route(cgImage: cgImage, afRect: afRect, afConfirmed: afConfirmed,
                            subject: subject, sharpenIntensity: 0.4,
                            thresholds: SharpnessThresholds(sharp: sharpThreshold,
                                                            acceptable: acceptableThreshold))
+        let _routeTime = -_tr.timeIntervalSinceNow
+        if _routeTime > 1.0 {
+            print("[Timing] \(_fn) SLOW ROUTE: \(String(format:"%.2f", _routeTime))s | rect: \(result.analysisRect.map{String(format:"%.3f x %.3f", $0.width, $0.height)} ?? "nil") | region: \(result.analysisRegion)")
+        }
 
         // Step 6 — Subject clipping: is the subject rect within 2% of any image edge?
         // Only computed when a contour exists — the contour body rect is tight and

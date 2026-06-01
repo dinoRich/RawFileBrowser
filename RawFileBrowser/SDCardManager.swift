@@ -657,21 +657,17 @@ final class SDCardManager: ObservableObject {
         let total       = rawFiles.count
         let urls        = rawFiles.map { $0.url }
 
-        print("[Analyze] starting — \(total) files")
         for batchStart in stride(from: 0, to: total, by: 6) {
             if analysisCancelled { break }
             let batchEnd = min(batchStart + 6, total)
-            print("[Analyze] batch \(batchStart)..<\(batchEnd)")
 
             await withTaskGroup(of: (Int, FocusResult).self) { group in
                 for i in batchStart..<batchEnd {
                     let url = urls[i]
                     group.addTask {
-                        print("[Analyze] task started for \(url.lastPathComponent)")
                         let r = await FocusAnalyzer.analyze(url: url,
                                                             sharpThreshold: sharpT,
                                                             acceptableThreshold: acceptableT)
-                        print("[Analyze] task done for \(url.lastPathComponent)")
                         return (i, r)
                     }
                 }
@@ -680,13 +676,11 @@ final class SDCardManager: ObservableObject {
                 }
             }
             analysisProgress = Double(batchEnd) / Double(total)
-            print("[Analyze] progress \(Int(analysisProgress * 100))%")
         }
         isAnalyzing = false
         analysisCancelled = false
         rebuildAllGroups()
         runBurstSharpnessRanking()
-        print("[Analyze] complete")
     }
 
     func analyzeFocus(for file: RAWFile) async {

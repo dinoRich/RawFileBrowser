@@ -726,7 +726,14 @@ struct FocusAnalyzer {
     /// Computes raw Laplacian variance for a CGImage crop without building a full FocusResult.
     /// Returns the combined sqrt(varH * varV) value — the same metric used in score().
     private static func rawLaplacian(cgImage: CGImage, sharpenIntensity: Double = 0.4) -> Double? {
-        let w = cgImage.width, h = cgImage.height
+        // Cap the scoring resolution to 512px on the longest side.
+        // Laplacian variance is reliable at this size and the pixel iteration
+        // is O(w*h) — scoring a 500x400 AF crop at full 2048px resolution takes
+        // 20s; capped to 512px it takes <0.1s with no meaningful accuracy loss.
+        let maxScoringDimension = 512
+        let scale = min(1.0, Double(maxScoringDimension) / Double(max(cgImage.width, cgImage.height)))
+        let w = max(3, Int(Double(cgImage.width)  * scale))
+        let h = max(3, Int(Double(cgImage.height) * scale))
         guard w > 2 && h > 2 else { return nil }
         let bpr = w * 4
         var pixels = [UInt8](repeating: 0, count: h * bpr)
