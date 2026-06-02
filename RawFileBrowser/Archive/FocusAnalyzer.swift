@@ -258,6 +258,12 @@ struct FocusAnalyzer {
     // can cause createCGImage to return nil under memory pressure.
     private static let sharedCIContext = CIContext(options: [.useSoftwareRenderer: false])
 
+    /// Serial queue for VNGenerateForegroundInstanceMaskRequest.
+    /// Running multiple mask requests concurrently causes the same Neural Engine
+    /// contention as concurrent YOLO calls — none complete. Serialising fixes this.
+    private static let maskQueue = DispatchQueue(label: "com.sharpeye.visionmask",
+                                                  qos: .userInitiated)
+
     // MARK: - Entry point
     //
     // Decision tree:
@@ -296,7 +302,6 @@ struct FocusAnalyzer {
                         sharpThreshold:      Double = 0.62,
                         acceptableThreshold: Double = 0.32) async -> FocusResult {
 
-        let _fn = url.lastPathComponent
         // Step 1 — AF point from camera Makernote
         let afRegion    = extractAFRegion(from: url,
                                           imageWidth: cgImage.width,
@@ -304,9 +309,6 @@ struct FocusAnalyzer {
         let afRect      = afRegion?.rect
         let afConfirmed = afRegion?.confirmed ?? false
 
-        // Steps 2 & 4 — Subject detection and species classification run concurrently.
-        // SpeciesDetector falls back to the full image when subjectBodyRect is nil,
-        // which is acceptable — the classifier performs well on full wildlife images.
         async let subjectTask = detectSubject(in: cgImage)
         async let speciesTask = SpeciesDetector.classify(cgImage: cgImage, subjectBodyRect: nil)
         let subject       = await subjectTask
@@ -317,15 +319,10 @@ struct FocusAnalyzer {
                                       subjectRect: subject.bodyRect ?? subject.bestRect)
 
         // Step 5 — Route to the correct analysis path
-        let _tr = Date()
         var result = route(cgImage: cgImage, afRect: afRect, afConfirmed: afConfirmed,
                            subject: subject, sharpenIntensity: 0.4,
                            thresholds: SharpnessThresholds(sharp: sharpThreshold,
                                                            acceptable: acceptableThreshold))
-        let _routeTime = -_tr.timeIntervalSinceNow
-        if _routeTime > 1.0 {
-            print("[Timing] \(_fn) SLOW ROUTE: \(String(format:"%.2f", _routeTime))s | rect: \(result.analysisRect.map{String(format:"%.3f x %.3f", $0.width, $0.height)} ?? "nil") | region: \(result.analysisRegion)")
-        }
 
         // Step 6 — Subject clipping: is the subject rect within 2% of any image edge?
         // Only computed when a contour exists — the contour body rect is tight and
@@ -729,7 +726,14 @@ struct FocusAnalyzer {
     /// Computes raw Laplacian variance for a CGImage crop without building a full FocusResult.
     /// Returns the combined sqrt(varH * varV) value — the same metric used in score().
     private static func rawLaplacian(cgImage: CGImage, sharpenIntensity: Double = 0.4) -> Double? {
-        let w = cgImage.width, h = cgImage.height
+        // Cap the scoring resolution to 512px on the longest side.
+        // Laplacian variance is reliable at this size and the pixel iteration
+        // is O(w*h) — scoring a 500x400 AF crop at full 2048px resolution takes
+        // 20s; capped to 512px it takes <0.1s with no meaningful accuracy loss.
+        let maxScoringDimension = 512
+        let scale = min(1.0, Double(maxScoringDimension) / Double(max(cgImage.width, cgImage.height)))
+        let w = max(3, Int(Double(cgImage.width)  * scale))
+        let h = max(3, Int(Double(cgImage.height) * scale))
         guard w > 2 && h > 2 else { return nil }
         let bpr = w * 4
         var pixels = [UInt8](repeating: 0, count: h * bpr)
@@ -952,7 +956,6 @@ struct FocusAnalyzer {
     }
 
     private static func detectSubject(in cgImage: CGImage) async -> SubjectResult {
-
         // Contour detection only — YOLO is no longer called here.
         // SpeciesDetector.classify handles YOLO separately. Running YOLO twice
         // per photo (once here, once in SpeciesDetector) doubled Neural Engine
@@ -1026,6 +1029,7 @@ struct FocusAnalyzer {
     private static func foregroundMaskContour(cgImage: CGImage) async -> [[CGPoint]] {
         return await withCheckedContinuation { (continuation: CheckedContinuation<[[CGPoint]], Never>) in
 
+            maskQueue.async {
             let maskRequest = VNGenerateForegroundInstanceMaskRequest()
             let handler     = VNImageRequestHandler(cgImage: cgImage, options: [:])
 
@@ -1128,6 +1132,7 @@ struct FocusAnalyzer {
             }
 
             continuation.resume(returning: allContours)
+            } // end maskQueue.async
         }
     }
         /// Morphological dilation: expands white (255) pixels outward by `radius` pixels.
