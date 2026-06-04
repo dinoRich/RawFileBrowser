@@ -67,15 +67,6 @@ struct SpeciesDetector {
 
         let detections = await YOLODetector.shared.detect(cgImage: imageToClassify)
 
-        // DEBUG — log what SpeciesDetector received from YOLODetector
-        print("🦅 [SpeciesDetector] received \(detections.count) detection(s) from YOLODetector (baseThreshold=\(baseThreshold)):")
-        if detections.isEmpty {
-            print("   ⚠️  No detections — model returned nothing above YOLODetector.confidenceThreshold.")
-        }
-        for d in detections.prefix(5) {
-            print("   • \(d.label): \(String(format: "%.4f", d.confidence))")
-        }
-
         // Collect top-5 regardless of the base threshold for the diagnostic view.
         let top5 = detections
             .sorted { $0.confidence > $1.confidence }
@@ -89,11 +80,9 @@ struct SpeciesDetector {
             .max(by: { $0.confidence < $1.confidence })
 
         guard let best else {
-            print("🦅 [SpeciesDetector] no result cleared baseThreshold (\(baseThreshold)) → label=nil")
             return SpeciesResult(label: nil, confidence: nil, candidates: Array(top5))
         }
 
-        print("🦅 [SpeciesDetector] winner: \"\(best.label)\" confidence=\(String(format: "%.4f", best.confidence))")
         return SpeciesResult(
             label: best.label.capitalized,
             confidence: best.confidence,

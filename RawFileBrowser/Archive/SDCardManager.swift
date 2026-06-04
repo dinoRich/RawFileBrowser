@@ -456,17 +456,6 @@ final class SDCardManager: ObservableObject {
             let threshold = Float(settings?.speciesThreshold(for: Float(file.subjectBodyArea)) ?? 0.65)
             return conf >= threshold
         }
-
-        // DEBUG — report how many files made it through the threshold filter
-        let withLabel = files.filter { $0.speciesLabel != nil }
-        print("🗂 [buildSpeciesGroups] \(files.count) total files, \(withLabel.count) have speciesLabel, \(labelled.count) cleared banded threshold")
-        for f in withLabel.prefix(10) {
-            let area = f.subjectBodyArea
-            let threshold = Float(settings?.speciesThreshold(for: Float(area)) ?? 0.65)
-            let conf = f.speciesConfidence ?? 0
-            let pass = conf >= threshold
-            print("   \(pass ? "✅" : "❌") \(f.name): label=\"\(f.speciesLabel ?? "nil")\" conf=\(String(format: "%.4f", conf)) area=\(String(format: "%.4f", area)) threshold=\(String(format: "%.4f", threshold))")
-        }
         guard !labelled.isEmpty else { return [] }
 
         // Group by normalised species key (lowercased, underscores → spaces).
@@ -741,9 +730,6 @@ final class SDCardManager: ObservableObject {
             rawFiles[idx].speciesConfidence   = result.speciesConfidence
             rawFiles[idx].speciesCandidates   = result.speciesCandidates
             rawFiles[idx].detectionConfidence = result.speciesConfidence
-            print("✅ [applyFocusResult] idx=\(idx) speciesLabel set to \"\(normLabel)\" conf=\(result.speciesConfidence.map { String(format: "%.4f", $0) } ?? "nil")")
-        } else {
-            print("⚠️ [applyFocusResult] idx=\(idx) speciesLabel=nil (not set)")
         }
 
         // detectedAnimalLabel — only from routing-time subject detection (requires contour).

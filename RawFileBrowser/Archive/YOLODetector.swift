@@ -103,27 +103,11 @@ final class YOLODetector {
     }
 
     private func parseResults(_ results: [VNObservation]) -> [YOLODetection] {
-        let allClassifications = results.compactMap { $0 as? VNClassificationObservation }
-
-        // DEBUG — log top-10 raw outputs before threshold filter
-        let top10Raw = allClassifications
-            .sorted { $0.confidence > $1.confidence }
-            .prefix(10)
-        print("🔍 [YOLODetector] \(allClassifications.count) raw classifications. Top-10 before threshold (\(YOLODetector.confidenceThreshold)):")
-        if top10Raw.isEmpty {
-            print("   ⚠️  No classifications returned by model at all.")
-        }
-        for obs in top10Raw {
-            let marker = obs.confidence >= YOLODetector.confidenceThreshold ? "✅" : "❌"
-            print("   \(marker) \(obs.identifier): \(String(format: "%.4f", obs.confidence))")
-        }
-
-        let filtered = allClassifications
+        results
+            .compactMap { $0 as? VNClassificationObservation }
             .filter     { $0.confidence >= YOLODetector.confidenceThreshold }
             .sorted     { $0.confidence > $1.confidence }
             .prefix(YOLODetector.maxDetections)
             .map        { YOLODetection(label: $0.identifier, confidence: $0.confidence) }
-        print("🔍 [YOLODetector] \(filtered.count) result(s) passed threshold.")
-        return filtered
     }
 }
