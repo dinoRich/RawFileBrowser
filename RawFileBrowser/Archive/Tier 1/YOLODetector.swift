@@ -47,13 +47,7 @@ enum YOLOLabels {
 final class YOLODetector {
 
     static let modelName            = "UKWildlife"
-    // The species threshold is applied downstream in SpeciesDetector: baseThreshold
-    // (0.15) for the stored winner, and the per-size banded thresholds for display.
-    // Keeping this pre-filter at 0 lets the full ranked list reach SpeciesDetector,
-    // so its top-5 candidate list (shown in the diagnostic view) is complete and its
-    // baseThreshold is what actually governs the result — previously this 0.35 gate
-    // silently hid every candidate below 0.35 before SpeciesDetector ever saw them.
-    static let confidenceThreshold: Float = 0.0
+    static let confidenceThreshold: Float = 0.35
     static let maxDetections        = 10
 
     static let shared = YOLODetector()

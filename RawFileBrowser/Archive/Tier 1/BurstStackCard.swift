@@ -205,7 +205,7 @@ struct BurstStackCard: View {
     private func loadThumbnail() {
         isLoading = true
         let url = stack.coverFile.url
-        DispatchQueue.global(qos: .utility).async {
+        DispatchQueue.global(qos: .background).async {
             let thumb = RAWImageLoader.thumbnail(from: url)
             DispatchQueue.main.async {
                 withAnimation(.easeIn(duration: 0.2)) {

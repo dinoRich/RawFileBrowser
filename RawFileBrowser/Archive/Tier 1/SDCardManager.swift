@@ -258,7 +258,6 @@ final class SDCardManager: ObservableObject {
     func forceRefresh() {
         activeDirectoryURL = nil
         isSDCardMounted = false
-        RAWImageLoader.clearThumbnailCache()
         rawFiles = []; gridItems = []; burstGroups = []; similarGroups = []; speciesGroups = []
         isLoading = true; errorMessage = nil
         Task {
@@ -271,7 +270,6 @@ final class SDCardManager: ObservableObject {
 
     func loadFilesFromDirectory(_ url: URL) {
         activeDirectoryURL = url
-        RAWImageLoader.clearThumbnailCache()
         isLoading = true; errorMessage = nil
         let found  = collectRAWFiles(in: url)
         let sorted = found.sorted { $0.name < $1.name }

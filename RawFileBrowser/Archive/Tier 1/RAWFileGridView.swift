@@ -75,69 +75,40 @@ struct RAWFileGridView: View {
     }
 
     // MARK: - Pill counts
-    //
-    // Every filter pill needs a count, and the section/pill bars evaluate all of
-    // them on each render. Computing each as a separate O(n) filter meant scanning
-    // the whole file array ~24× per render. Instead we tally every bucket in a
-    // single pass and hand the resulting dictionary to the views that need it.
 
-    private var filterCounts: [FilterMode: Int] {
-        var accepted = 0, rejected = 0
-        var sharp = 0, slight = 0, blurry = 0, unanalyzed = 0
-        var s1 = 0, s2 = 0, s3 = 0, s4 = 0, s5 = 0
-        var red = 0, yellow = 0, green = 0, blue = 0, purple = 0
-        var burstBest = 0, clipped = 0, over = 0, under = 0
-        let settings = manager.settings
-
-        for f in manager.rawFiles {
-            switch f.pickStatus {
-            case .accepted: accepted += 1
-            case .rejected: rejected += 1
-            case .unpicked: break
-            }
-            switch f.focusStatus {
-            case .sharp:        sharp += 1
-            case .slightlyBlur: slight += 1
-            case .blurry:       blurry += 1
-            case .unanalyzed:   unanalyzed += 1
-            }
-            switch f.starRating {
-            case 1: s1 += 1
-            case 2: s2 += 1
-            case 3: s3 += 1
-            case 4: s4 += 1
-            case 5: s5 += 1
-            default: break
-            }
-            switch f.labelColour {
-            case .red:    red += 1
-            case .yellow: yellow += 1
-            case .green:  green += 1
-            case .blue:   blue += 1
-            case .purple: purple += 1
-            case .none:   break
-            }
-            if f.isBurstSharpnessBest { burstBest += 1 }
-            if f.subjectClipped { clipped += 1 }
-            if let ea = f.exposureAssessment, let issue = settings?.exposureIssue(for: ea) {
-                if issue == .overexposed { over += 1 }
-                else if issue == .underexposed { under += 1 }
-            }
+    private func pillCount(for mode: FilterMode) -> Int {
+        switch mode {
+        case .all:          return manager.rawFiles.count
+        case .bursts:       return burstGroupCount
+        case .similar:      return manager.similarGroups.count
+        case .accepted:     return manager.rawFiles.filter { $0.pickStatus == .accepted }.count
+        case .rejected:     return manager.rawFiles.filter { $0.pickStatus == .rejected }.count
+        case .sharp:        return manager.rawFiles.filter { $0.focusStatus == .sharp }.count
+        case .slightlyBlur: return manager.rawFiles.filter { $0.focusStatus == .slightlyBlur }.count
+        case .blurry:       return manager.rawFiles.filter { $0.focusStatus == .blurry }.count
+        case .unanalyzed:   return manager.rawFiles.filter { $0.focusStatus == .unanalyzed }.count
+        case .star1:        return manager.rawFiles.filter { $0.starRating == 1 }.count
+        case .star2:        return manager.rawFiles.filter { $0.starRating == 2 }.count
+        case .star3:        return manager.rawFiles.filter { $0.starRating == 3 }.count
+        case .star4:        return manager.rawFiles.filter { $0.starRating == 4 }.count
+        case .star5:        return manager.rawFiles.filter { $0.starRating == 5 }.count
+        case .colourRed:    return manager.rawFiles.filter { $0.labelColour == .red }.count
+        case .colourYellow: return manager.rawFiles.filter { $0.labelColour == .yellow }.count
+        case .colourGreen:  return manager.rawFiles.filter { $0.labelColour == .green }.count
+        case .colourBlue:   return manager.rawFiles.filter { $0.labelColour == .blue }.count
+        case .colourPurple: return manager.rawFiles.filter { $0.labelColour == .purple }.count
+        case .species:    return manager.speciesGroups.count
+        case .burstBest:  return manager.rawFiles.filter { $0.isBurstSharpnessBest }.count
+        case .overexposed:
+            return manager.rawFiles.filter { f in
+                f.exposureAssessment.flatMap { manager.settings?.exposureIssue(for: $0) } == .overexposed
+            }.count
+        case .underexposed:
+            return manager.rawFiles.filter { f in
+                f.exposureAssessment.flatMap { manager.settings?.exposureIssue(for: $0) } == .underexposed
+            }.count
+        case .clipped:    return manager.rawFiles.filter { $0.subjectClipped }.count
         }
-
-        return [
-            .all: manager.rawFiles.count,
-            .bursts: burstGroupCount,
-            .similar: manager.similarGroups.count,
-            .species: manager.speciesGroups.count,
-            .accepted: accepted, .rejected: rejected,
-            .sharp: sharp, .slightlyBlur: slight, .blurry: blurry, .unanalyzed: unanalyzed,
-            .star1: s1, .star2: s2, .star3: s3, .star4: s4, .star5: s5,
-            .colourRed: red, .colourYellow: yellow, .colourGreen: green,
-            .colourBlue: blue, .colourPurple: purple,
-            .burstBest: burstBest, .clipped: clipped,
-            .overexposed: over, .underexposed: under
-        ]
     }
 
     // MARK: - Section → filter modes mapping
@@ -165,14 +136,14 @@ struct RAWFileGridView: View {
     }
 
     /// Pills shown in the bottom bar for the active section (zero-count hidden).
-    private func visibleFilterModes(_ counts: [FilterMode: Int]) -> [FilterMode] {
-        modesForSection(filterSection).filter { (counts[$0] ?? 0) > 0 }
+    private var visibleFilterModes: [FilterMode] {
+        modesForSection(filterSection).filter { pillCount(for: $0) > 0 }
     }
 
     /// Whether a section top-bar pill appears dimmed (no populated filter pills).
-    private func sectionIsEmpty(_ section: FilterSection, counts: [FilterMode: Int]) -> Bool {
+    private func sectionIsEmpty(_ section: FilterSection) -> Bool {
         guard section != .all else { return false }
-        return modesForSection(section).allSatisfy { (counts[$0] ?? 0) == 0 }
+        return modesForSection(section).allSatisfy { pillCount(for: $0) == 0 }
     }
 
     // MARK: - Filtered grid items
@@ -374,10 +345,6 @@ struct RAWFileGridView: View {
 
     private var topLevelGrid: some View {
         VStack(spacing: 0) {
-            // Tallied once per render, then shared with the section and pill bars
-            // instead of recomputing each pill's count independently.
-            let counts = filterCounts
-
             if manager.isAnalyzing        { analysisBanner }
             if manager.isComputingHashes  { hashBanner }
 
@@ -399,7 +366,7 @@ struct RAWFileGridView: View {
                         SectionPill(
                             title: section.rawValue,
                             isSelected: filterSection == section,
-                            isEmpty: sectionIsEmpty(section, counts: counts)
+                            isEmpty: sectionIsEmpty(section)
                         ) {
                             filterSection = section
                             // Reset filter mode when switching sections.
@@ -408,7 +375,7 @@ struct RAWFileGridView: View {
                             if section == .all {
                                 filterMode = .all
                             } else {
-                                let first = modesForSection(section).first(where: { (counts[$0] ?? 0) > 0 })
+                                let first = modesForSection(section).first(where: { pillCount(for: $0) > 0 })
                                 filterMode = first ?? .all
                             }
                         }
@@ -418,14 +385,14 @@ struct RAWFileGridView: View {
             }
 
             // ── Bottom bar: filter pills for active section ───────────────────
-            if filterSection != .all && !visibleFilterModes(counts).isEmpty {
+            if filterSection != .all && !visibleFilterModes.isEmpty {
                 Divider()
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 8) {
-                        ForEach(visibleFilterModes(counts), id: \.self) { mode in
+                        ForEach(visibleFilterModes, id: \.self) { mode in
                             FilterPill(
                                 mode: mode,
-                                count: counts[mode] ?? 0,
+                                count: pillCount(for: mode),
                                 isSelected: filterMode == mode
                             ) { filterMode = mode }
                         }

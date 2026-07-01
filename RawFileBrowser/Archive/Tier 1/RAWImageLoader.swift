@@ -11,29 +11,6 @@ struct RAWImageLoadResult {
 
 enum RAWImageLoader {
 
-    // MARK: - Thumbnail cache
-    //
-    // Grid and burst cards reload their thumbnail whenever the view reappears
-    // (scrolling, filter changes, returning from the detail view). Re-decoding the
-    // embedded preview from the SD card each time is the dominant scroll cost.
-    // Thumbnails are immutable per (url, size), so we cache the decoded UIImage.
-    // NSCache is thread-safe and evicts automatically under memory pressure.
-    private static let thumbnailCache: NSCache<NSString, UIImage> = {
-        let cache = NSCache<NSString, UIImage>()
-        cache.countLimit = 600
-        return cache
-    }()
-
-    private static func thumbnailCacheKey(_ url: URL, _ maxDimension: Int) -> NSString {
-        "\(url.absoluteString)|\(maxDimension)" as NSString
-    }
-
-    /// Clears the thumbnail cache. Call when switching source directories so
-    /// stale entries from a previous card can't survive a re-scan.
-    static func clearThumbnailCache() {
-        thumbnailCache.removeAllObjects()
-    }
-
     // MARK: - Full image load (detail view)
 
     static func load(from url: URL) -> RAWImageLoadResult {
@@ -99,14 +76,6 @@ enum RAWImageLoader {
     // MARK: - Thumbnail load (grid card)
 
     static func thumbnail(from url: URL, maxDimension: Int = 400) -> UIImage? {
-        let key = thumbnailCacheKey(url, maxDimension)
-        if let cached = thumbnailCache.object(forKey: key) { return cached }
-        guard let image = decodeThumbnail(from: url, maxDimension: maxDimension) else { return nil }
-        thumbnailCache.setObject(image, forKey: key)
-        return image
-    }
-
-    private static func decodeThumbnail(from url: URL, maxDimension: Int) -> UIImage? {
         guard let src = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
 
         let opts: [CFString: Any] = [
