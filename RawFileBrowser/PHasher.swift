@@ -163,3 +163,103 @@ struct SimilarGroup: Identifiable {
     var coverFile: RAWFile { files[0] }
     var count: Int { files.count }
 }
+
+// MARK: - Colour signature
+
+extension PHasher {
+
+    // A compact colour signature: a 16-bin normalised hue histogram computed
+    // from the same 256px thumbnail used for pHash. Saturation-weighted so that
+    // near-grey pixels (which have unreliable hue) contribute less to the bins.
+    //
+    // Low-saturation images (overcast grey mud, grey sky) will produce flat
+    // histograms — colourDistance will then be near 0 for any two such images,
+    // which is correct: we cannot distinguish them by colour alone. The pHash
+    // gate still applies in that case.
+
+    /// Compute a 16-bin hue histogram for the RAW file at `url`.
+    /// Returns nil if the thumbnail cannot be loaded.
+    static func colourSignature(for url: URL) -> [Float]? {
+        guard let thumbnail = loadThumbnailForColour(from: url) else { return nil }
+        return hueHistogram(thumbnail, bins: 16)
+    }
+
+    /// Histogram intersection distance in [0, 1].
+    /// 0 = identical colour distribution. 1 = no overlap at all.
+    /// Returns 0 when either signature is nil (no colour gate applied).
+    static func colourDistance(_ a: [Float]?, _ b: [Float]?) -> Float {
+        guard let a, let b, a.count == b.count else { return 0 }
+        let intersection = zip(a, b).map { min($0, $1) }.reduce(0, +)
+        return 1.0 - intersection   // both histograms are already normalised to sum=1
+    }
+
+    // MARK: - Private helpers
+
+    /// Load the thumbnail at a slightly larger size than pHash needs so hue
+    /// sampling has more pixels to work with. Reuses the same ImageIO path.
+    private static func loadThumbnailForColour(from url: URL) -> CGImage? {
+        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
+        let opts: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageIfAbsent: true,
+            kCGImageSourceThumbnailMaxPixelSize: 256,
+            kCGImageSourceCreateThumbnailWithTransform: true
+        ]
+        return CGImageSourceCreateThumbnailAtIndex(src, 0, opts as CFDictionary)
+    }
+
+    /// Build a normalised saturation-weighted hue histogram from a CGImage.
+    private static func hueHistogram(_ image: CGImage, bins: Int) -> [Float]? {
+        let w = image.width, h = image.height
+        guard w > 0, h > 0 else { return nil }
+
+        // Render to an RGBA 8-bit buffer
+        var pixels = [UInt8](repeating: 0, count: w * h * 4)
+        guard let ctx = CGContext(
+            data: &pixels,
+            width: w, height: h,
+            bitsPerComponent: 8,
+            bytesPerRow: w * 4,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { return nil }
+        ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
+
+        var histogram = [Float](repeating: 0, count: bins)
+        var totalWeight: Float = 0
+
+        let pixelCount = w * h
+        for i in 0..<pixelCount {
+            let base = i * 4
+            let r = Float(pixels[base])     / 255.0
+            let g = Float(pixels[base + 1]) / 255.0
+            let b = Float(pixels[base + 2]) / 255.0
+
+            let maxC = max(r, g, b)
+            let minC = min(r, g, b)
+            let delta = maxC - minC
+
+            // Skip near-grey pixels — their hue is unreliable
+            let saturation = maxC > 0 ? delta / maxC : 0
+            guard saturation > 0.15 else { continue }
+
+            // Compute hue in [0, 360)
+            var hue: Float = 0
+            if delta > 0 {
+                switch maxC {
+                case r: hue = 60.0 * (((g - b) / delta).truncatingRemainder(dividingBy: 6))
+                case g: hue = 60.0 * ((b - r) / delta + 2)
+                default: hue = 60.0 * ((r - g) / delta + 4)
+                }
+                if hue < 0 { hue += 360 }
+            }
+
+            let bin = min(Int(hue / 360.0 * Float(bins)), bins - 1)
+            histogram[bin] += saturation   // weight by saturation
+            totalWeight    += saturation
+        }
+
+        // Normalise to sum = 1; return flat histogram for near-grey images
+        guard totalWeight > 0 else { return [Float](repeating: 1.0 / Float(bins), count: bins) }
+        return histogram.map { $0 / totalWeight }
+    }
+}

@@ -507,10 +507,10 @@ struct RAWFileGridView: View {
                     guard ids.contains(item.id) else { continue }
                     switch item {
                     case .single(let f):
-                        if let live = manager.liveFile(id: f.id) { files.append(live) }
+                        if let live = manager.rawFiles.first(where: { $0.id == f.id }) { files.append(live) }
                     case .group(let g):
                         for f in g.files {
-                            if let live = manager.liveFile(id: f.id) { files.append(live) }
+                            if let live = manager.rawFiles.first(where: { $0.id == f.id }) { files.append(live) }
                         }
                     }
                 }

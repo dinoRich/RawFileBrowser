@@ -35,7 +35,7 @@ enum XMPSidecarWriter {
     /// Returns the URL of the written sidecar on success.
     @discardableResult
     static func write(for file: RAWFile) throws -> URL {
-        guard let species = speciesKeyword(for: file), !species.isEmpty else {
+        guard let species = file.detectedAnimalLabel, !species.isEmpty else {
             throw WriteError.noSpeciesLabel
         }
         let sidecarURL = sidecarURL(for: file.url)
@@ -55,7 +55,7 @@ enum XMPSidecarWriter {
         var errors: [String] = []
 
         for file in files {
-            guard speciesKeyword(for: file) != nil else {
+            guard file.detectedAnimalLabel != nil else {
                 skipped += 1
                 continue
             }
@@ -110,17 +110,6 @@ enum XMPSidecarWriter {
 
     // MARK: - Helpers
 
-    /// The species keyword to write. Prefers the trained classifier result
-    /// (speciesLabel); falls back to the generic Vision animal label. Confidence
-    /// banding is applied by callers that have AppSettings (e.g. writeXMPBatch and
-    /// the detail-view action), so this returns the best available name for the
-    /// keyword itself.
-    private static func speciesKeyword(for file: RAWFile) -> String? {
-        if let s = file.speciesLabel, !s.isEmpty { return s }
-        if let g = file.detectedAnimalLabel, !g.isEmpty { return g }
-        return nil
-    }
-
     /// Returns the sidecar URL for a given RAW file URL.
     /// e.g. /Volumes/SD/DCIM/IMG_0001.CR3 → /Volumes/SD/DCIM/IMG_0001.xmp
     static func sidecarURL(for rawURL: URL) -> URL {
@@ -132,18 +121,17 @@ enum XMPSidecarWriter {
         FileManager.default.fileExists(atPath: sidecarURL(for: file.url).path)
     }
 
-    /// Maps the detected species to a human-readable group label.
+    /// Maps the detected animal's iconic taxon to a human-readable group label.
     private static func groupLabel(for file: RAWFile) -> String {
-        let name = speciesKeyword(for: file)?.lowercased()
+        // Use the analysis region to infer bird vs mammal
         switch file.focusRegion {
         case .animalEyes, .animalHead, .animalBody, .yoloEyes, .yoloHead, .yoloBody:
-            if let name, isBirdName(name) { return "Birds" }
+            // Try to determine from the label itself
+            if let label = file.detectedAnimalLabel?.lowercased() {
+                if isBirdName(label) { return "Birds" }
+            }
             return "Mammals"
         default:
-            // Even without an animal scoring region, use the name to place birds
-            // correctly (the classifier may identify a species the geometric
-            // detector didn't localise).
-            if let name, isBirdName(name) { return "Birds" }
             return "Wildlife"
         }
     }

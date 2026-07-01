@@ -65,6 +65,7 @@ struct RAWFile: Identifiable {
 
     // MARK: Perceptual hash — populated at load time
     var pHash: UInt64? = nil
+    var colourSig: [Float]? = nil
 
     // MARK: Species — populated alongside focus analysis
     var speciesLabel: String? = nil
@@ -107,7 +108,13 @@ struct PhotoGroup: Identifiable {
     var files: [RAWFile]
     var kind: Kind
 
-    enum Kind { case confirmedBurst, similar }
+    enum Kind {
+        case confirmedBurst
+        case similar
+        /// A group assembled by rejection-reason logic in the My Picks view.
+        /// The associated label is the reason name (e.g. "Blurry", "No Flags").
+        case reasonGroup(label: String)
+    }
 
     init(files: [RAWFile], kind: Kind, id: UUID = UUID()) {
         self.id    = id
@@ -117,8 +124,10 @@ struct PhotoGroup: Identifiable {
 
     var coverFile: RAWFile { files[0] }
     var count: Int { files.count }
-    var isBurst:   Bool { if case .confirmedBurst = kind { return true }; return false }
-    var isSimilar: Bool { if case .similar        = kind { return true }; return false }
+    var isBurst:       Bool    { if case .confirmedBurst = kind { return true }; return false }
+    var isSimilar:     Bool    { if case .similar        = kind { return true }; return false }
+    var isReasonGroup: Bool    { if case .reasonGroup    = kind { return true }; return false }
+    var reasonLabel:   String? { if case .reasonGroup(let l) = kind { return l }; return nil }
 }
 
 // MARK: - GridItem
@@ -145,7 +154,6 @@ private let burstGapThreshold: TimeInterval = 2.0
 
 /// Session window for similar grouping. Photos further apart than this are
 /// never grouped as similar, regardless of visual appearance.
-private let sessionWindowSeconds: TimeInterval = 2 * 60 * 60   // 2 hours
 
 private let rawExtensions: Set<String> = [
     "raw", "arw", "cr2", "cr3", "nef", "nrw", "orf", "rw2",
@@ -279,11 +287,14 @@ final class SDCardManager: ObservableObject {
 
             if !indices.isEmpty {
                 let urls = indices.map { rawFiles[$0].url }
-                let hashes: [UInt64?] = await Task.detached(priority: .userInitiated) {
-                    urls.map { PHasher.hash(for: $0) }
+                let (hashes, colourSigs): ([UInt64?], [[Float]?]) = await Task.detached(priority: .userInitiated) {
+                    let h = urls.map { PHasher.hash(for: $0) }
+                    let c = urls.map { PHasher.colourSignature(for: $0) }
+                    return (h, c)
                 }.value
                 for (offset, i) in indices.enumerated() {
-                    rawFiles[i].pHash = hashes[offset]
+                    rawFiles[i].pHash     = hashes[offset]
+                    rawFiles[i].colourSig = colourSigs[offset]
                 }
             }
 
@@ -376,7 +387,9 @@ final class SDCardManager: ObservableObject {
     // The two arrays are completely independent.
 
     private func buildSimilarGroups(from files: [RAWFile]) -> [PhotoGroup] {
-        let threshold = settings?.similarityThreshold ?? PHasher.defaultSimilarityThreshold
+        let threshold       = settings?.similarityThreshold  ?? PHasher.defaultSimilarityThreshold
+        let windowSeconds   = TimeInterval((settings?.sessionWindowMinutes ?? 30) * 60)
+        let colourThreshold = Float(settings?.colourSimilarityThreshold ?? 0.45)
 
         // Only files with a hash are candidates, sorted by date.
         let candidates = files
@@ -385,45 +398,97 @@ final class SDCardManager: ObservableObject {
         let m = candidates.count
         guard m >= 2 else { return [] }
 
-        // Union-Find over candidate indices.
-        // Two files are connected if they are within the session window AND
-        // their pHash distance is within the threshold.
-        // Union-Find transitivity is correct here: if A~B and B~C then A, B, C
-        // are genuinely related — they form a chain of visually similar photos.
-        // The session window prevents unrelated photos from different days linking.
-        var parent = Array(0..<m)
+        // Seed-based grouping — avoids Union-Find chaining where A~B and B~C
+        // would incorrectly merge A and C even when hammingDistance(A,C) > threshold.
+        //
+        // A candidate joins an existing group only if it is within:
+        //   1. sessionWindowMinutes of the SEED's capture time, AND
+        //   2. pHash Hamming distance ≤ similarityThreshold from the SEED, AND
+        //   3. colour histogram distance ≤ colourSimilarityThreshold from the SEED.
+        //
+        // The colour gate prevents compositionally-similar but chromatically-different
+        // scenes (e.g. sandy beach vs green grass) from being grouped together.
+        // Near-grey images produce flat histograms; colourDistance returns ~0 for
+        // both, so the gate is effectively skipped for low-saturation scenes.
 
-        func find(_ x: Int) -> Int {
-            var x = x
-            while parent[x] != x { parent[x] = parent[parent[x]]; x = parent[x] }
-            return x
-        }
-        func union(_ a: Int, _ b: Int) {
-            let ra = find(a), rb = find(b)
-            if ra != rb { parent[ra] = rb }
-        }
+        var assigned = [Bool](repeating: false, count: m)
+        var clusters: [[RAWFile]] = []
 
         for i in 0..<m {
-            guard let hi = candidates[i].pHash,
-                  let di = candidates[i].modificationDate else { continue }
+            guard !assigned[i],
+                  let seedHash = candidates[i].pHash,
+                  let seedDate = candidates[i].modificationDate else { continue }
+
+            var group: [RAWFile] = [candidates[i]]
+            assigned[i] = true
+
             for j in (i+1)..<m {
-                guard let hj = candidates[j].pHash,
+                guard !assigned[j],
+                      let hj = candidates[j].pHash,
                       let dj = candidates[j].modificationDate,
-                      abs(di.timeIntervalSince(dj)) <= sessionWindowSeconds,
-                      PHasher.hammingDistance(hi, hj) <= threshold
+                      abs(seedDate.timeIntervalSince(dj)) <= windowSeconds,
+                      PHasher.hammingDistance(seedHash, hj) <= threshold,
+                      PHasher.colourDistance(candidates[i].colourSig, candidates[j].colourSig) <= colourThreshold
                 else { continue }
-                union(i, j)
+                group.append(candidates[j])
+                assigned[j] = true
+            }
+
+            clusters.append(group)
+        }
+
+        // ── Pass 2: merge adjacent clusters across the drift boundary ───────
+        //
+        // Seed-based grouping splits a continuous sequence into multiple clusters
+        // when photos drift gradually away from the seed (subject moves, reframe,
+        // slight exposure change). Comparing seed-to-seed cannot reunite them,
+        // because the two seeds are exactly the photos that were too far apart to
+        // group in Pass 1.
+        //
+        // Instead we compare across the ADJACENCY BOUNDARY: the LAST (latest) photo
+        // of one cluster against the FIRST (earliest) photo of the next. Drift that
+        // crosses a split shows up here as a near-identical boundary pair. Each
+        // cluster's members are already sorted by date within Pass 1, so .last and
+        // .first are the chronological boundary.
+        //
+        // Safety: this is bounded single-hop merging, not transitive chaining. We
+        // walk clusters in chronological order and only fold a cluster into the
+        // immediately-preceding accumulated group when its boundary pair passes all
+        // three gates (time window, pHash, colour). A cluster of a different subject
+        // will not bridge, because its boundary photo won't match.
+
+        // Clusters in chronological order by their earliest photo.
+        let orderedClusters = clusters.sorted {
+            ($0.first?.modificationDate ?? .distantFuture) < ($1.first?.modificationDate ?? .distantFuture)
+        }
+
+        var mergedClusters: [[RAWFile]] = []
+
+        for cluster in orderedClusters {
+            guard let clusterFirst     = cluster.first,
+                  let clusterFirstHash = clusterFirst.pHash,
+                  let clusterFirstDate = clusterFirst.modificationDate else {
+                mergedClusters.append(cluster)
+                continue
+            }
+
+            // Only consider merging into the most recent accumulated group, and
+            // only across the boundary: its last photo vs this cluster's first.
+            if let lastIdx = mergedClusters.indices.last,
+               let boundaryPrev     = mergedClusters[lastIdx].last,
+               let boundaryPrevHash = boundaryPrev.pHash,
+               let boundaryPrevDate = boundaryPrev.modificationDate,
+               abs(boundaryPrevDate.timeIntervalSince(clusterFirstDate)) <= windowSeconds,
+               PHasher.hammingDistance(boundaryPrevHash, clusterFirstHash) <= threshold,
+               PHasher.colourDistance(boundaryPrev.colourSig, clusterFirst.colourSig) <= colourThreshold {
+                mergedClusters[lastIdx].append(contentsOf: cluster)
+            } else {
+                mergedClusters.append(cluster)
             }
         }
 
-        // Collect clusters by root index.
-        var clusters: [Int: [RAWFile]] = [:]
-        for i in 0..<m {
-            clusters[find(i), default: []].append(candidates[i])
-        }
-
         // Species veto temporarily disabled.
-        return clusters.values
+        return mergedClusters
             .filter { $0.count >= 2 }
             .map { group in
                 let sorted = group.sorted {
@@ -455,6 +520,17 @@ final class SDCardManager: ObservableObject {
                   file.speciesLabel != nil else { return false }
             let threshold = Float(settings?.speciesThreshold(for: Float(file.subjectBodyArea)) ?? 0.65)
             return conf >= threshold
+        }
+
+        // DEBUG — report how many files made it through the threshold filter
+        let withLabel = files.filter { $0.speciesLabel != nil }
+        print("🗂 [buildSpeciesGroups] \(files.count) total files, \(withLabel.count) have speciesLabel, \(labelled.count) cleared banded threshold")
+        for f in withLabel.prefix(10) {
+            let area = f.subjectBodyArea
+            let threshold = Float(settings?.speciesThreshold(for: Float(area)) ?? 0.65)
+            let conf = f.speciesConfidence ?? 0
+            let pass = conf >= threshold
+            print("   \(pass ? "✅" : "❌") \(f.name): label=\"\(f.speciesLabel ?? "nil")\" conf=\(String(format: "%.4f", conf)) area=\(String(format: "%.4f", area)) threshold=\(String(format: "%.4f", threshold))")
         }
         guard !labelled.isEmpty else { return [] }
 
@@ -730,6 +806,9 @@ final class SDCardManager: ObservableObject {
             rawFiles[idx].speciesConfidence   = result.speciesConfidence
             rawFiles[idx].speciesCandidates   = result.speciesCandidates
             rawFiles[idx].detectionConfidence = result.speciesConfidence
+            print("✅ [applyFocusResult] idx=\(idx) speciesLabel set to \"\(normLabel)\" conf=\(result.speciesConfidence.map { String(format: "%.4f", $0) } ?? "nil")")
+        } else {
+            print("⚠️ [applyFocusResult] idx=\(idx) speciesLabel=nil (not set)")
         }
 
         // detectedAnimalLabel — only from routing-time subject detection (requires contour).
@@ -748,12 +827,39 @@ final class SDCardManager: ObservableObject {
             if let action = settings?.action(for: result.status) {
                 applyOutcomeAction(action, to: idx)
             }
-            // 2. Subject clipping flag — applied on top, overrides where non-default
+            // 2. Motion blur — fires in addition to focus status action when blur
+            //    type is specifically motion (not defocus), allowing separate handling
+            //    of intentional panning shots vs missed focus.
+            if result.blurType == .motionBlur,
+               let action = settings?.motionBlurAction {
+                applyOutcomeAction(action, to: idx)
+            }
+            // 3. Subject clipping flag — applied on top, overrides where non-default
             if result.subjectClipped,
                let action = settings?.subjectClippedAction {
                 applyOutcomeAction(action, to: idx)
             }
-            // 3. Exposure flags — subject clip fractions checked against user thresholds
+            // 4. No subject detected — fires when neither geometric detection nor
+            //    contour localisation found any subject. Distinct from "blurry".
+            if result.detectedAnimalLabel == nil && result.subjectContour.isEmpty,
+               let action = settings?.noSubjectDetectedAction {
+                applyOutcomeAction(action, to: idx)
+            }
+            // 5. Subject too small — fires when a subject was detected but occupies
+            //    less than the user-configured minimum area fraction of the image.
+            if result.detectedAnimalLabel != nil || !result.subjectContour.isEmpty,
+               let threshold = settings?.minSubjectAreaThreshold,
+               result.subjectBodyArea < threshold,
+               let action = settings?.subjectTooSmallAction {
+                applyOutcomeAction(action, to: idx)
+            }
+            // 6. AF missed subject — fires when a Canon AF point was found but
+            //    confirmed NOT to overlap the detected subject.
+            if result.afNotOnSubject,
+               let action = settings?.afMissedSubjectAction {
+                applyOutcomeAction(action, to: idx)
+            }
+            // 7. Exposure flags — subject clip fractions checked against user thresholds
             if let ea = result.exposureAssessment,
                let issue = settings?.exposureIssue(for: ea) {
                 let action = issue == .overexposed
@@ -879,20 +985,21 @@ final class SDCardManager: ObservableObject {
     // MARK: - Burst sharpness ranking
     //
     // Runs automatically after species grouping completes and after any full
-    // focus analysis batch. For every species burst (2+ time-adjacent photos
-    // of the same species), finds the photo with the highest focusScore and
-    // marks it isBurstSharpnessBest = true. All other photos in that burst
-    // are set to false.
+    // focus analysis batch. For every burst (2+ time-adjacent photos),
+    // ranks photos by a composite score (sharpness × weight + exposure × weight
+    // + subject area × weight — configured by the user in Settings).
+    //
+    // burstKeepCount (user-configured) controls how many photos per burst are
+    // "winners". Photos outside the top-N receive burstNonWinnerAction if set.
+    //
+    // isBurstSharpnessBest marks the single best photo (rank 1) as before.
+    // burstRank stores the numeric rank (1 = best) for all ranked photos.
+    //
+    // Outlier detection (mean − 1.5σ) fires softInBurstAction independently
+    // and is not affected by burstKeepCount.
     //
     // Only fully-analysed photos (focusStatus != .unanalyzed) are candidates.
-    // A burst needs at least 2 analysed photos for any crown to be awarded.
     // Rejected photos are excluded from contention entirely.
-    //
-    // Tie-breaking order:
-    //   1. focusScore (higher wins)
-    //   2. afOverlapsSubject (true wins)
-    //   3. rawSharpnessScore (higher wins)
-    //   4. burst order (earlier photo wins)
 
     private func runBurstSharpnessRanking() {
         // Reset all burst flags so every run starts clean.
@@ -902,10 +1009,8 @@ final class SDCardManager: ObservableObject {
             rawFiles[i].burstRank            = nil
         }
 
-        // Rank within burstGroups, not speciesGroups. speciesGroups only contains
-        // photos with a recognised species label, so unidentified photos (no YOLO
-        // classification above threshold) would never receive a crown or rank.
-        // burstGroups covers all time-adjacent photos regardless of species.
+        let keepCount = settings?.burstKeepCount ?? 1
+
         for group in burstGroups {
             let sorted = group.files
                 .compactMap { file in rawFiles.first { $0.id == file.id } }
@@ -932,26 +1037,45 @@ final class SDCardManager: ObservableObject {
                 }
                 guard candidates.count >= 2 else { continue }
 
-                // ── Crown: single best photo ──────────────────────────────────
-                let best = candidates.max { a, b in
-                    if a.focusScore != b.focusScore { return a.focusScore < b.focusScore }
+                // ── Composite score ranking ───────────────────────────────────
+                // Sort by composite score descending; tie-break on focusScore,
+                // then afOverlapsSubject, then rawSharpnessScore, then burst order.
+                let ranked = candidates.sorted { a, b in
+                    let scoreA = settings?.burstCompositeScore(
+                        focusScore: a.focusScore,
+                        subjectBodyArea: a.subjectBodyArea,
+                        exposureAssessment: a.exposureAssessment) ?? a.focusScore
+                    let scoreB = settings?.burstCompositeScore(
+                        focusScore: b.focusScore,
+                        subjectBodyArea: b.subjectBodyArea,
+                        exposureAssessment: b.exposureAssessment) ?? b.focusScore
+                    if scoreA != scoreB { return scoreA > scoreB }
+                    if a.focusScore != b.focusScore { return a.focusScore > b.focusScore }
                     let afA = a.afOverlapsSubject ?? false
                     let afB = b.afOverlapsSubject ?? false
-                    if afA != afB { return !afA }
+                    if afA != afB { return afA }
                     if a.rawSharpnessScore != b.rawSharpnessScore {
-                        return a.rawSharpnessScore < b.rawSharpnessScore
+                        return a.rawSharpnessScore > b.rawSharpnessScore
                     }
-                    return (a.modificationDate ?? .distantFuture) > (b.modificationDate ?? .distantFuture)
-                }
-                if let best, let idx = rawFiles.firstIndex(where: { $0.id == best.id }) {
-                    rawFiles[idx].isBurstSharpnessBest = true
+                    return (a.modificationDate ?? .distantFuture) < (b.modificationDate ?? .distantFuture)
                 }
 
-                // ── Top-3 ranks ───────────────────────────────────────────────
-                let ranked = candidates.sorted { $0.focusScore > $1.focusScore }
-                for (rank, candidate) in ranked.prefix(3).enumerated() {
-                    if let idx = rawFiles.firstIndex(where: { $0.id == candidate.id }) {
-                        rawFiles[idx].burstRank = rank + 1
+                for (rank, candidate) in ranked.enumerated() {
+                    guard let idx = rawFiles.firstIndex(where: { $0.id == candidate.id }) else { continue }
+                    let rankNumber = rank + 1
+                    // Only assign a crown badge for photos within the keep window.
+                    // keepCount == 0 means burst ranking UI is disabled entirely.
+                    if keepCount > 0 && rankNumber <= keepCount {
+                        rawFiles[idx].burstRank = rankNumber
+                        if rankNumber == 1 {
+                            rawFiles[idx].isBurstSharpnessBest = true
+                        }
+                    }
+                    // burstNonWinnerAction fires for photos outside the top-N,
+                    // but only when burstKeepCount > 0 (feature is enabled).
+                    if keepCount > 0 && rankNumber > keepCount && !rawFiles[idx].pickIsOverridden,
+                       let action = settings?.burstNonWinnerAction {
+                        applyOutcomeAction(action, to: idx)
                     }
                 }
 

@@ -22,7 +22,9 @@ struct BurstDetailGridView: View {
 
     /// Live versions of this stack's files, so badges update in real time.
     private var liveFiles: [RAWFile] {
-        group.files.compactMap { manager.liveFile(id: $0.id) }
+        group.files.compactMap { file in
+            manager.rawFiles.first { $0.id == file.id }
+        }
     }
 
     /// Count of files in this stack matching a given filter mode.
@@ -190,7 +192,7 @@ struct BurstDetailGridView: View {
                 onDismiss: { lastViewedID in
                     // Build the scroll ID to match the .id() modifier on the card.
                     // We need the live file to get its current focusStatus / pickStatus.
-                    if let liveFile = manager.liveFile(id: lastViewedID) {
+                    if let liveFile = manager.rawFiles.first(where: { $0.id == lastViewedID }) {
                         scrollToID = "\(liveFile.id)-\(liveFile.focusStatus.rawValue)-\(liveFile.pickStatus.rawValue)"
                     }
                 }

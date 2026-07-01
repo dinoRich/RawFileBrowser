@@ -113,6 +113,53 @@ struct SettingsView: View {
                             .foregroundStyle(.secondary)
                     }
                     .padding(.vertical, 4)
+
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack {
+                            Text("Session Window")
+                                .font(.body)
+                            Spacer()
+                            Text("\(settings.sessionWindowMinutes) min")
+                                .font(.body.monospacedDigit())
+                                .foregroundStyle(.secondary)
+                        }
+
+                        Slider(
+                            value: Binding(
+                                get: { Double(settings.sessionWindowMinutes) },
+                                set: { settings.sessionWindowMinutes = Int($0.rounded()) }
+                            ),
+                            in: 5...120, step: 5
+                        )
+                        .tint(.accentColor)
+
+                        Text("Maximum time between two photos for them to be eligible for similar grouping. Prevents photos from different subjects shot in the same session being incorrectly grouped. Default is 30 minutes.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(.vertical, 4)
+
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack {
+                            Text("Colour Similarity")
+                                .font(.body)
+                            Spacer()
+                            Text(String(format: "%.2f", settings.colourSimilarityThreshold))
+                                .font(.body.monospacedDigit())
+                                .foregroundStyle(.secondary)
+                        }
+
+                        Slider(
+                            value: $settings.colourSimilarityThreshold,
+                            in: 0.1...1.0, step: 0.05
+                        )
+                        .tint(.accentColor)
+
+                        Text("Maximum colour histogram distance for similar grouping. Lower = stricter colour matching. Near-grey scenes are unaffected. Default is 0.45. Re-run Find Similar after changing.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(.vertical, 4)
                 } header: {
                     Text("Similar Photo Detection")
                 }
@@ -157,6 +204,24 @@ struct SettingsView: View {
                         iconColor: .cyan,
                         action: $settings.softInBurstAction
                     )
+                    OutcomeRow(
+                        label: "AF Missed Subject",
+                        icon: "scope",
+                        iconColor: .orange,
+                        action: $settings.afMissedSubjectAction
+                    )
+                    OutcomeRow(
+                        label: "No Subject Detected",
+                        icon: "questionmark.circle",
+                        iconColor: .gray,
+                        action: $settings.noSubjectDetectedAction
+                    )
+                    OutcomeRow(
+                        label: "Motion Blur",
+                        icon: "wind",
+                        iconColor: .teal,
+                        action: $settings.motionBlurAction
+                    )
 
                     VStack(alignment: .leading, spacing: 10) {
                         OutcomeRow(
@@ -194,7 +259,98 @@ struct SettingsView: View {
                 } header: {
                     Text("Flag-Based Auto-Actions")
                 } footer: {
-                    Text("Applied on top of the focus status action above. Subject Clipped fires when the detected subject touches the frame edge. Soft in Burst fires when a photo is significantly softer than its burst peers. Exposure flags use the subject region where available. Re-run analysis after changing exposure levels.")
+                    Text("Applied on top of the focus status action. AF Missed Subject fires when Canon AF data shows the camera focused away from the detected subject. Motion Blur is separate from defocus — configure to taste if you shoot panning shots. Exposure flags use the subject region where available. Re-run analysis after changing.")
+                }
+
+                // ── Section 6: Composition auto-actions ──────────────────────
+                Section {
+                    VStack(alignment: .leading, spacing: 10) {
+                        OutcomeRow(
+                            label: "Subject Too Small",
+                            icon: "arrow.down.right.and.arrow.up.left",
+                            iconColor: .indigo,
+                            action: $settings.subjectTooSmallAction
+                        )
+                        ThresholdSliderRow(
+                            label: "Minimum subject size",
+                            detail: "% of image area — below this fires action",
+                            color: .indigo,
+                            value: $settings.minSubjectAreaThreshold,
+                            range: 0.001...0.10,
+                            formatAsPercent: true
+                        )
+                    }
+                } header: {
+                    Text("Composition Auto-Actions")
+                } footer: {
+                    Text("Subject Too Small fires when a subject was detected but occupies less than the threshold. No Subject Detected (above) fires when no subject was found at all. Both fire independently of focus status.")
+                }
+
+                // ── Section 7: Burst ranking ──────────────────────────────────
+                Section {
+                    VStack(alignment: .leading, spacing: 10) {
+                        OutcomeRow(
+                            label: "Burst Non-Winner",
+                            icon: "photo.stack",
+                            iconColor: .brown,
+                            action: $settings.burstNonWinnerAction
+                        )
+
+                        HStack {
+                            Text("Keep per burst")
+                                .font(.subheadline)
+                            Spacer()
+                            Text(settings.burstKeepCount == 0 ? "Disabled" : "\(settings.burstKeepCount)")
+                                .font(.body.monospacedDigit())
+                                .foregroundStyle(.secondary)
+                        }
+                        Slider(
+                            value: Binding(
+                                get: { Double(settings.burstKeepCount) },
+                                set: { settings.burstKeepCount = Int($0.rounded()) }
+                            ),
+                            in: 0...10, step: 1
+                        )
+                        .tint(.brown)
+                        Text("Set to 0 to disable burst non-winner actions entirely. Set to 1 to keep only the best photo per burst. The Burst Non-Winner action is applied to all photos outside the top-N after burst ranking runs.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    VStack(alignment: .leading, spacing: 16) {
+                        Text("Burst Ranking Weights")
+                            .font(.subheadline.weight(.medium))
+                        Text("Controls how the best photo in a burst is chosen. Weights are normalised automatically — you control the relative importance of each factor.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+
+                        ThresholdSliderRow(
+                            label: "Sharpness",
+                            detail: "Focus score contribution",
+                            color: .green,
+                            value: $settings.burstRankSharpnessWeight,
+                            range: 0.0...1.0
+                        )
+                        ThresholdSliderRow(
+                            label: "Exposure",
+                            detail: "Well-exposed frames score higher",
+                            color: .yellow,
+                            value: $settings.burstRankExposureWeight,
+                            range: 0.0...1.0
+                        )
+                        ThresholdSliderRow(
+                            label: "Subject Size",
+                            detail: "Larger subject in frame scores higher",
+                            color: .indigo,
+                            value: $settings.burstRankSubjectSizeWeight,
+                            range: 0.0...1.0
+                        )
+                    }
+                    .padding(.vertical, 4)
+                } header: {
+                    Text("Burst Ranking")
+                } footer: {
+                    Text("Burst ranking runs automatically after analysis. Re-run analysis to apply updated weights to existing results.")
                 }
 
             }

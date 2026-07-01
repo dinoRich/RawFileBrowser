@@ -19,7 +19,7 @@ struct RAWFileThumbnailCard: View {
 
     /// Always read live state from the manager so the UI stays in sync.
     private var liveFile: RAWFile? {
-        manager.liveFile(id: file.id)
+        manager.rawFiles.first { $0.id == file.id }
     }
 
     var body: some View {
@@ -206,7 +206,7 @@ struct LabelPickerSheet: View {
     }
 
     private var liveFile: RAWFile? {
-        manager.liveFile(id: file.id)
+        manager.rawFiles.first { $0.id == file.id }
     }
 
     var body: some View {
@@ -583,7 +583,8 @@ struct MultiSelectionLabelPickerSheet: View {
 
     // Resolve snapshot IDs to live copies so ratings display correctly after changes.
     private var allLiveFiles: [RAWFile] {
-        selectedFiles.compactMap { manager.liveFile(id: $0.id) }
+        let ids = Set(selectedFiles.map { $0.id })
+        return manager.rawFiles.filter { ids.contains($0.id) }
     }
 }
 

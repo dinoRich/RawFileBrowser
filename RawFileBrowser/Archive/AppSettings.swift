@@ -318,35 +318,6 @@ final class AppSettings: ObservableObject {
         return Double(confidence) >= threshold ? label : nil
     }
 
-    // MARK: - Resolved display species
-    //
-    // Single source of truth for "what species should the UI show / XMP export
-    // for this file". Prefers the trained classifier result (speciesLabel),
-    // honouring the per-subject-size confidence band. Falls back to the generic
-    // Apple Vision animal label (detectedAnimalLabel) only when the classifier
-    // produced nothing. Returns nil when neither clears its threshold.
-    //
-    // Use this everywhere species is displayed or written, so the classifier's
-    // result — not the generic Vision label — is what the user sees and exports.
-
-    func displaySpecies(for file: RAWFile) -> (label: String, confidence: Float?)? {
-        // Trained classifier result, banded by subject size.
-        if let species = file.speciesLabel,
-           let shown = visibleSpeciesLabel(label: species,
-                                           confidence: file.speciesConfidence,
-                                           subjectBodyArea: file.subjectBodyArea) {
-            return (shown, file.speciesConfidence)
-        }
-        // Fallback: generic Vision animal label (no numeric confidence → always shown).
-        if let generic = file.detectedAnimalLabel,
-           let shown = visibleSpeciesLabel(label: generic,
-                                           confidence: file.detectionConfidence,
-                                           subjectBodyArea: file.subjectBodyArea) {
-            return (shown, file.detectionConfidence)
-        }
-        return nil
-    }
-
     // MARK: - Exposure issue check (using user-configured thresholds)
     //
     // Returns the exposure verdict using the user's configured clip thresholds

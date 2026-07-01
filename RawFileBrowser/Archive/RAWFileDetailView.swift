@@ -19,7 +19,7 @@ struct RAWFileDetailView: View {
     private var currentFileID: UUID { fileIDs[currentIndex] }
 
     private var file: RAWFile {
-        manager.liveFile(id: currentFileID)
+        manager.rawFiles.first(where: { $0.id == currentFileID })
             ?? RAWFile(url: URL(fileURLWithPath: ""))
     }
 
@@ -261,7 +261,11 @@ struct RAWFileDetailView: View {
                                     scale: scale,
                                     offset: offset,
                                     subjectContour: file.subjectContour,
-                                    detectedLabel: settings.displaySpecies(for: file)?.label
+                                    detectedLabel: settings.visibleSpeciesLabel(
+                                        label: file.detectedAnimalLabel,
+                                        confidence: file.detectionConfidence,
+                                        subjectBodyArea: file.subjectBodyArea
+                                    )
                                 )
                             }
 
@@ -423,13 +427,13 @@ struct RAWFileDetailView: View {
             if fullImage != nil {
                 Button("Share") { showShareSheet = true }
             }
-            if let species = settings.displaySpecies(for: file) {
+            if settings.visibleSpeciesLabel(label: file.detectedAnimalLabel, confidence: file.detectionConfidence, subjectBodyArea: file.subjectBodyArea) != nil {
                 Button(file.xmpWritten ? "XMP Already Written" : "Write XMP") {
                     if !file.xmpWritten {
                         do {
                             try XMPSidecarWriter.write(for: file)
                             manager.markXMPWritten(for: file)
-                            xmpMessage = "XMP written for \(species.label)"
+                            xmpMessage = "XMP written for \(file.detectedAnimalLabel ?? String())"
                         } catch {
                             xmpMessage = error.localizedDescription
                         }
@@ -540,15 +544,14 @@ struct RAWFileDetailView: View {
                 }
             }
             .buttonStyle(.plain)
-            let species = settings.displaySpecies(for: file)
-            if file.focusStatus != .unanalyzed || species != nil {
+            if file.focusStatus != .unanalyzed || file.detectedAnimalLabel != nil {
                 VStack(spacing: 5) {
-                    if let species {
+                    if let label = settings.visibleSpeciesLabel(label: file.detectedAnimalLabel, confidence: file.detectionConfidence, subjectBodyArea: file.subjectBodyArea) {
                         HStack(spacing: 4) {
                             Image(systemName: "pawprint.fill")
-                            Text(species.label.replacingOccurrences(of: "_", with: " ").capitalized)
+                            Text(label.replacingOccurrences(of: "_", with: " ").capitalized)
                                 .fontWeight(.medium)
-                            if let conf = species.confidence {
+                            if let conf = file.detectionConfidence {
                                 Text("\(Int(conf * 100))%").foregroundStyle(.cyan.opacity(0.7))
                             } else {
                                 Text("Vision").foregroundStyle(.cyan.opacity(0.7))

@@ -32,11 +32,12 @@ struct BurstStackCard: View {
     @State private var showActionSheet = false
 
     private var liveCover: RAWFile? {
-        manager.liveFile(id: stack.coverFile.id)
+        manager.rawFiles.first { $0.id == stack.coverFile.id }
     }
 
     private var liveFiles: [RAWFile] {
-        let live = stack.files.compactMap { manager.liveFile(id: $0.id) }
+        let ids = Set(stack.files.map { $0.id })
+        let live = manager.rawFiles.filter { ids.contains($0.id) }
         return live.isEmpty ? stack.files : live
     }
 
@@ -491,7 +492,7 @@ struct BurstLabelPickerSheet: View {
     }
 
     private var liveCover: RAWFile? {
-        manager.liveFile(id: stack.coverFile.id)
+        manager.rawFiles.first { $0.id == stack.coverFile.id }
     }
 
     var body: some View {
