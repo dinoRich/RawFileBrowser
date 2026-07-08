@@ -148,15 +148,30 @@ struct RAWFileDetailView: View {
                                             // at zoom > 1 the drag gesture above handles panning.
                                             guard scale <= 1.0 else { return }
                                             let horizontal = val.translation.width
-                                            let vertical   = abs(val.translation.height)
-                                            // Require the swipe to be more horizontal than vertical
-                                            guard abs(horizontal) > vertical else { return }
-                                            if horizontal < 0 {
-                                                // Swipe left → next photo
-                                                navigateTo(currentIndex + 1)
+                                            let vertical   = val.translation.height
+                                            if abs(horizontal) > abs(vertical) {
+                                                // Horizontal → photo navigation
+                                                if horizontal < 0 { navigateTo(currentIndex + 1) }
+                                                else              { navigateTo(currentIndex - 1) }
+                                            } else if vertical < 0 {
+                                                // Swipe up → accept (toggles off if already
+                                                // accepted), haptic, auto-advance. One-gesture
+                                                // culling — the pattern used by dedicated
+                                                // culling tools.
+                                                let next: PickStatus =
+                                                    file.pickStatus == .accepted ? .unpicked : .accepted
+                                                manager.setPickStatus(next, for: file)
+                                                UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                                                if next == .accepted { navigateTo(currentIndex + 1) }
                                             } else {
-                                                // Swipe right → previous photo
-                                                navigateTo(currentIndex - 1)
+                                                // Swipe down → reject (toggles off), haptic,
+                                                // auto-advance.
+                                                let next: PickStatus =
+                                                    file.pickStatus == .rejected ? .unpicked : .rejected
+                                                manager.setPickStatus(next, for: file)
+                                                UINotificationFeedbackGenerator()
+                                                    .notificationOccurred(next == .rejected ? .warning : .success)
+                                                if next == .rejected { navigateTo(currentIndex + 1) }
                                             }
                                         }
                                 )
@@ -355,13 +370,14 @@ struct RAWFileDetailView: View {
                 ToolbarItemGroup(placement: .navigationBarTrailing) {
 
                     // ── 1. Focus Analyser — leftmost (circle.dashed, matches grid view) ─
+                    // Always enabled: re-running after a Settings threshold change
+                    // must be possible. Dimmed (not disabled) once analysed.
                     Button {
                         Task { await manager.analyzeFocus(for: file) }
                     } label: {
                         Image(systemName: "circle.dashed")
                     }
-                    .foregroundStyle(file.focusStatus == .unanalyzed ? .white : .white.opacity(0.4))
-                    .disabled(file.focusStatus != .unanalyzed)
+                    .foregroundStyle(file.focusStatus == .unanalyzed ? .white : .white.opacity(0.6))
 
                     // ── 2. AF point overlay toggle — inverted colours when ON ──────────
                     if !afPoints.isEmpty {
@@ -427,7 +443,7 @@ struct RAWFileDetailView: View {
                 Button(file.xmpWritten ? "XMP Already Written" : "Write XMP") {
                     if !file.xmpWritten {
                         do {
-                            try XMPSidecarWriter.write(for: file)
+                            try XMPSidecarWriter.write(for: file, species: species.label)
                             manager.markXMPWritten(for: file)
                             xmpMessage = "XMP written for \(species.label)"
                         } catch {
@@ -446,6 +462,38 @@ struct RAWFileDetailView: View {
             // Reload the image every time currentFileID changes (i.e. after a swipe)
             await loadFullImage()
         }
+        // Swipe-down is now the reject gesture, so the sheet's interactive
+        // pull-to-dismiss must not compete with it. Dismiss via the Done button.
+        .interactiveDismissDisabled()
+        // Hidden buttons provide hardware-keyboard culling on iPad
+        // (Lightroom-compatible bindings: P pick, X reject, U unpick,
+        // 0–5 stars, ←/→ navigate). Zero visual footprint.
+        .background {
+            Group {
+                Button("") { setPick(file.pickStatus == .accepted ? .unpicked : .accepted) }
+                    .keyboardShortcut("p", modifiers: [])
+                Button("") { setPick(file.pickStatus == .rejected ? .unpicked : .rejected) }
+                    .keyboardShortcut("x", modifiers: [])
+                Button("") { setPick(.unpicked) }
+                    .keyboardShortcut("u", modifiers: [])
+                ForEach(0..<6) { n in
+                    Button("") { manager.setStarRating(n, for: file) }
+                        .keyboardShortcut(KeyEquivalent(Character(String(n))), modifiers: [])
+                }
+                Button("") { navigateTo(currentIndex + 1) }
+                    .keyboardShortcut(.rightArrow, modifiers: [])
+                Button("") { navigateTo(currentIndex - 1) }
+                    .keyboardShortcut(.leftArrow, modifiers: [])
+            }
+            .opacity(0)
+            .accessibilityHidden(true)
+        }
+    }
+
+    /// Sets a pick status with light haptic feedback (keyboard shortcut path).
+    private func setPick(_ status: PickStatus) {
+        manager.setPickStatus(status, for: file)
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
     }
 
     // MARK: - Swipe navigation
@@ -872,18 +920,41 @@ struct RAWFileDetailView: View {
 
         let url = file.url
 
+        // ── Phase 1: instant preview ─────────────────────────────────────
+        // The thumbnail decode is fast (and usually already in the NSCache),
+        // so swiping never shows a black "Decoding RAW…" screen. The
+        // full-resolution image replaces it below when ready.
+        let preview = await Task.detached(priority: .userInitiated) {
+            RAWImageLoader.thumbnail(from: url, maxDimension: 1024)
+        }.value
+        guard !Task.isCancelled else { return }
+        if let preview {
+            fullImage = preview
+            isLoading = false
+        }
+
+        // ── AF points ────────────────────────────────────────────────────
         let extractedPoints: [CanonAFPoint] = await Task.detached(priority: .userInitiated) {
             CanonMakernoteParser.extractAFPoints(from: url) ?? []
         }.value
+        guard !Task.isCancelled else { return }
         afPoints = extractedPoints
 
+        // ── Phase 2: full-resolution decode (100% zoom inspection) ───────
         let result = await Task.detached(priority: .userInitiated) {
             RAWImageLoader.load(from: url)
         }.value
+        // A fast swipe cancels this task and starts a new one — never let a
+        // stale decode overwrite the photo now on screen.
+        guard !Task.isCancelled, url == file.url else { return }
 
-        fullImage    = result.image
+        if let img = result.image {
+            fullImage = img
+        } else if fullImage == nil {
+            // Only surface the error when there is nothing at all to show.
+            loadError = result.error
+        }
         metadata     = result.metadata
-        loadError    = result.error
         usedFallback = result.usedFallback
         isLoading    = false
     }
@@ -1002,7 +1073,12 @@ struct ShareSheet: UIViewControllerRepresentable {
 struct HistogramView: View {
     let image: UIImage
 
-    private var buckets: [CGFloat] {
+    // Cached in @State and recomputed only when the image object changes.
+    // Previously a computed property read inside Canvas — a ~200×150px scan
+    // on the main thread on EVERY render (zoom badge, overlay toggles, …).
+    @State private var buckets: [CGFloat] = []
+
+    private static func computeBuckets(for image: UIImage) -> [CGFloat] {
         guard let cgImage = image.cgImage else { return Array(repeating: 0, count: 256) }
         let width  = cgImage.width
         let height = cgImage.height
@@ -1039,6 +1115,7 @@ struct HistogramView: View {
     var body: some View {
         Canvas { ctx, size in
             let b = buckets
+            guard !b.isEmpty else { return }
             let barW = size.width / CGFloat(b.count)
             for (i, height) in b.enumerated() {
                 let barH = height * size.height
@@ -1056,6 +1133,13 @@ struct HistogramView: View {
             RoundedRectangle(cornerRadius: 4)
                 .strokeBorder(.white.opacity(0.15), lineWidth: 0.5)
         )
+        .task(id: ObjectIdentifier(image)) {
+            let img = image
+            let computed = await Task.detached(priority: .utility) {
+                Self.computeBuckets(for: img)
+            }.value
+            if !Task.isCancelled { buckets = computed }
+        }
     }
 }
 

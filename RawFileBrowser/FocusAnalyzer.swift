@@ -314,9 +314,6 @@ struct FocusAnalyzer {
         let subject       = await subjectTask
         let speciesResult = await speciesTask
 
-        // DEBUG — log species result before it enters FocusResult
-        let fname = url.lastPathComponent
-        print("📋 [FocusAnalyzer] \(fname) → speciesLabel=\(speciesResult.label ?? "nil"), confidence=\(speciesResult.confidence.map { String(format: "%.4f", $0) } ?? "nil"), candidates=\(speciesResult.candidates.count)")
         let exposure = assessExposure(cgImage: cgImage,
                                       subjectRect: subject.bodyRect ?? subject.bestRect)
 
@@ -614,11 +611,6 @@ struct FocusAnalyzer {
                            exposureAssessment: nil)
     }
 
-    /// Shared CIContext for all sharpening operations.
-    /// Creating a CIContext is expensive (it sets up GPU resources), so we reuse
-    /// a single instance across all calls rather than allocating one per photo.
-    private static let ciContext = CIContext()
-
     /// Applies a mild unsharp mask to a crop before Laplacian scoring.
     /// This compensates for JPEG compression softening in the embedded preview,
     /// which would otherwise cause the Laplacian to underestimate true sharpness.
@@ -633,7 +625,7 @@ struct FocusAnalyzer {
         filter.setValue(1.0,       forKey: kCIInputRadiusKey)    // edge detection radius in pixels
         filter.setValue(intensity, forKey: kCIInputIntensityKey) // sharpening strength (0=none, 1=strong)
         guard let output = filter.outputImage else { return image }
-        return ciContext.createCGImage(output, from: output.extent) ?? image
+        return sharedCIContext.createCGImage(output, from: output.extent) ?? image
     }
 
     /// Computes raw Laplacian variance for a normalised rect, counting only pixels
@@ -1165,32 +1157,6 @@ struct FocusAnalyzer {
             } // end maskQueue.async
         }
     }
-        /// Morphological dilation: expands white (255) pixels outward by `radius` pixels.
-    /// Used to bridge small gaps in the foreground mask that would otherwise fragment
-    /// the subject into disconnected regions.
-    private static func dilateMask(_ input: [UInt8], width: Int, height: Int, radius: Int) -> [UInt8] {
-        var output = [UInt8](repeating: 0, count: width * height)
-        for y in 0..<height {
-            for x in 0..<width {
-                guard input[y * width + x] > 0 else { continue }
-                let y0 = max(0, y - radius), y1 = min(height - 1, y + radius)
-                let x0 = max(0, x - radius), x1 = min(width  - 1, x + radius)
-                for dy in y0...y1 { for dx in x0...x1 {
-                    output[dy * width + dx] = 255
-                }}
-            }
-        }
-        return output
-    }
-
-    // MARK: - YOLO helpers
-
-    private static func bestAnimalDetection(from detections: [YOLODetection]) -> YOLODetection? {
-        let animals = detections.filter { $0.isAnimal }
-        return animals.max(by: { $0.confidence < $1.confidence })
-            ?? detections.max(by: { $0.confidence < $1.confidence })
-    }
-
     // MARK: - Vision animal detection
 
     private struct AnimalDetectionResult {

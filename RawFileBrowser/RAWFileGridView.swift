@@ -206,7 +206,9 @@ struct RAWFileGridView: View {
                     let matching = g.files.filter { matchesSearch($0) }
                     if matching.isEmpty { return nil }
                     if matching.count == 1 { return .single(matching[0]) }
-                    return .group(PhotoGroup(files: matching, kind: .confirmedBurst))
+                    // Reuse the source group's ID: a fresh UUID per render churns
+                    // SwiftUI identity (cell rebuilds, broken scroll-restore).
+                    return .group(PhotoGroup(files: matching, kind: .confirmedBurst, id: g.id))
                 }
             }
 
@@ -224,7 +226,7 @@ struct RAWFileGridView: View {
                     let matching = group.files.filter { matchesFilter($0) && matchesSearch($0) }
                     if matching.isEmpty { return nil }
                     if matching.count == 1 { return .single(matching[0]) }
-                    return .group(PhotoGroup(files: matching, kind: group.kind))
+                    return .group(PhotoGroup(files: matching, kind: group.kind, id: group.id))
                 }
             }
         }
@@ -252,7 +254,7 @@ struct RAWFileGridView: View {
             groups = manager.similarGroups.compactMap { group in
                 let matching = group.files.filter { matchesSearch($0) }
                 guard matching.count >= 2 else { return nil }
-                return PhotoGroup(files: matching, kind: .similar)
+                return PhotoGroup(files: matching, kind: .similar, id: group.id)
             }
         }
         return groups.sorted {
@@ -380,6 +382,7 @@ struct RAWFileGridView: View {
 
             if manager.isAnalyzing        { analysisBanner }
             if manager.isComputingHashes  { hashBanner }
+            if manager.isWritingXMP       { xmpBanner }
 
             if isSelectMode {
                 HStack {
@@ -509,11 +512,11 @@ struct RAWFileGridView: View {
 
                 if !isSelectMode {
                     Button {
-                        let msg = manager.writeXMPBatch()
-                        xmpResultMessage = msg
+                        Task { xmpResultMessage = await manager.writeXMPBatch() }
                     } label: {
                         Label("Save XMP", systemImage: "square.and.arrow.down")
                     }
+                    .disabled(manager.isWritingXMP || manager.rawFiles.isEmpty)
                 }
             }
         }
@@ -553,7 +556,7 @@ struct RAWFileGridView: View {
                 .presentationDetents([.height(280)])
                 .presentationDragIndicator(.visible)
         }
-        .alert("XMP Written", isPresented: Binding(
+        .alert("XMP Export", isPresented: Binding(
             get: { xmpResultMessage != nil },
             set: { if !$0 { xmpResultMessage = nil } }
         )) {
@@ -765,7 +768,7 @@ struct RAWFileGridView: View {
         return manager.speciesGroups.compactMap { group in
             let matching = group.files.filter { matchesSearch($0) }
             guard matching.count >= 2 else { return nil }
-            return PhotoGroup(files: matching, kind: .similar)
+            return PhotoGroup(files: matching, kind: .similar, id: group.id)
         }
     }
 
@@ -791,7 +794,10 @@ struct RAWFileGridView: View {
                     showMultiLabelSheet = true
                 }
             }
-            .id("\(file.id)-\(file.focusStatus.rawValue)-\(file.pickStatus.rawValue)")
+            // Plain UUID: scrollTo(UUID) can find the cell, and flag/status
+            // changes update in place instead of tearing the cell down
+            // (which reloaded the thumbnail and caused a visible flash).
+            .id(file.id)
 
         case .group(let group):
             BurstStackCard(
@@ -849,6 +855,18 @@ struct RAWFileGridView: View {
             Text("Scanning for similar photos…").font(.subheadline.weight(.medium))
             Spacer()
             Text("\(Int(manager.hashProgress * 100))%")
+                .font(.subheadline.monospacedDigit()).foregroundStyle(.secondary)
+        }
+        .padding(.horizontal).padding(.vertical, 10)
+        .background(Color(.secondarySystemBackground))
+    }
+
+    private var xmpBanner: some View {
+        HStack {
+            ProgressView().padding(.trailing, 4)
+            Text("Writing XMP sidecars…").font(.subheadline.weight(.medium))
+            Spacer()
+            Text("\(Int(manager.xmpProgress * 100))%")
                 .font(.subheadline.monospacedDigit()).foregroundStyle(.secondary)
         }
         .padding(.horizontal).padding(.vertical, 10)

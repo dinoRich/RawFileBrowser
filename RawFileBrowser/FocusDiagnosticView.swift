@@ -8,6 +8,20 @@ import SwiftUI
 
 struct FocusDiagnosticView: View {
     let file: RAWFile
+    /// Inherited from the presenting view's environment. Used so the exposure
+    /// verdict shown here agrees with the user-configured thresholds that drive
+    /// the filters and outcome actions (not the hardcoded fallback values).
+    @EnvironmentObject var settings: AppSettings
+
+    /// Exposure verdict using the user's configured clip thresholds.
+    /// exposureIssue returns nil when no threshold fires → "Well exposed".
+    private func settingsVerdict(for ea: ExposureAssessment) -> (label: String, color: Color) {
+        switch settings.exposureIssue(for: ea) {
+        case .overexposed:  return ("Overexposed",  Color(UIColor.systemRed))
+        case .underexposed: return ("Underexposed", Color(UIColor.systemBlue))
+        default:            return ("Well exposed", Color(UIColor.systemGreen))
+        }
+    }
 
     var body: some View {
         NavigationStack {
@@ -156,7 +170,8 @@ struct FocusDiagnosticView: View {
 
                     // ── Exposure assessment ──────────────────────────────────
                     if let exp = file.exposureAssessment {
-                        ExposureSection(exposure: exp)
+                        ExposureSection(exposure: exp,
+                                        verdictOverride: settingsVerdict(for: exp))
                     }
 
                     Spacer(minLength: 32)
@@ -403,14 +418,18 @@ private struct ThresholdGuideCard: View {
 
 private struct ExposureSection: View {
     let exposure: ExposureAssessment
+    /// Verdict computed with the user's configured thresholds, overriding the
+    /// hardcoded ExposureAssessment.verdict so the diagnostic never disagrees
+    /// with the grid filters and outcome actions.
+    var verdictOverride: (label: String, color: Color)? = nil
 
     var body: some View {
         DiagSection(title: "Exposure", icon: "sun.max") {
 
-            // Overall verdict
+            // Overall verdict — user thresholds when available
             DiagRow("Verdict",
-                    value: exposure.summaryLabel,
-                    highlight: Color(exposure.verdictColor),
+                    value: verdictOverride?.label ?? exposure.summaryLabel,
+                    highlight: verdictOverride?.color ?? Color(exposure.verdictColor),
                     bold: true)
 
             // Whole-image signals

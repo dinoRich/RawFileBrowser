@@ -199,6 +199,10 @@ final class SDCardManager: ObservableObject {
     @Published var isLoading:        Bool   = false
     @Published var isAnalyzing:      Bool   = false
     @Published var analysisProgress: Double = 0
+
+    // XMP batch export state — drives the progress banner in the grid.
+    @Published var isWritingXMP:     Bool   = false
+    @Published var xmpProgress:      Double = 0
     @Published var errorMessage:     String?
 
     var burstPhotoCount:   Int { burstGroups.reduce(0)   { $0 + $1.count } }
@@ -248,7 +252,10 @@ final class SDCardManager: ObservableObject {
         guard !isSDCardMounted else { return }
         isLoading = true; errorMessage = nil
         Task {
-            let found = scanForRAWFiles()
+            // Disk enumeration off the main actor so the UI stays responsive.
+            let found = await Task.detached(priority: .userInitiated) {
+                Self.scanForRAWFiles()
+            }.value
             await loadAndGroup(found)
             if !found.isEmpty { isSDCardMounted = true }
             isLoading = false
@@ -262,7 +269,9 @@ final class SDCardManager: ObservableObject {
         rawFiles = []; gridItems = []; burstGroups = []; similarGroups = []; speciesGroups = []
         isLoading = true; errorMessage = nil
         Task {
-            let found = scanForRAWFiles()
+            let found = await Task.detached(priority: .userInitiated) {
+                Self.scanForRAWFiles()
+            }.value
             await loadAndGroup(found)
             isSDCardMounted = !found.isEmpty || detectExternalVolumes()
             isLoading = false
@@ -273,15 +282,23 @@ final class SDCardManager: ObservableObject {
         activeDirectoryURL = url
         RAWImageLoader.clearThumbnailCache()
         isLoading = true; errorMessage = nil
-        let found  = collectRAWFiles(in: url)
-        let sorted = found.sorted { $0.name < $1.name }
-        isSDCardMounted = true; isLoading = false
-        if found.isEmpty {
-            errorMessage = "No RAW files found in the selected directory."
-            rawFiles = []; gridItems = []; burstGroups = []; similarGroups = []; speciesGroups = []
-            return
+        Task {
+            // Enumeration + per-file resourceValues reads are disk I/O — run off
+            // the main actor so the loading spinner stays responsive on big cards.
+            let found = await Task.detached(priority: .userInitiated) {
+                Self.collectRAWFiles(in: url)
+            }.value
+            let sorted = found.sorted { $0.name < $1.name }
+            isSDCardMounted = true
+            if sorted.isEmpty {
+                errorMessage = "No RAW files found in the selected directory."
+                rawFiles = []; gridItems = []; burstGroups = []; similarGroups = []; speciesGroups = []
+                isLoading = false
+                return
+            }
+            await loadAndGroup(sorted)
+            isLoading = false
         }
-        Task { await loadAndGroup(sorted) }
     }
 
     // MARK: - Load pipeline
@@ -547,16 +564,6 @@ final class SDCardManager: ObservableObject {
             return conf >= threshold
         }
 
-        // DEBUG — report how many files made it through the threshold filter
-        let withLabel = files.filter { $0.speciesLabel != nil }
-        print("🗂 [buildSpeciesGroups] \(files.count) total files, \(withLabel.count) have speciesLabel, \(labelled.count) cleared banded threshold")
-        for f in withLabel.prefix(10) {
-            let area = f.subjectBodyArea
-            let threshold = Float(settings?.speciesThreshold(for: Float(area)) ?? 0.65)
-            let conf = f.speciesConfidence ?? 0
-            let pass = conf >= threshold
-            print("   \(pass ? "✅" : "❌") \(f.name): label=\"\(f.speciesLabel ?? "nil")\" conf=\(String(format: "%.4f", conf)) area=\(String(format: "%.4f", area)) threshold=\(String(format: "%.4f", threshold))")
-        }
         guard !labelled.isEmpty else { return [] }
 
         // Group by normalised species key (lowercased, underscores → spaces).
@@ -754,9 +761,14 @@ final class SDCardManager: ObservableObject {
         guard !rawFiles.isEmpty else { return }
         isAnalyzing = true; analysisCancelled = false; analysisProgress = 0
         let sharpT      = settings?.sharpThreshold      ?? 0.62
-        let acceptableT = settings?.acceptableThreshold ?? 0.32
+        // Guard against misconfigured Settings: acceptable must sit below sharp,
+        // otherwise the slightly-blurry band vanishes or inverts.
+        let acceptableT = min(settings?.acceptableThreshold ?? 0.32, sharpT - 0.01)
         let total       = rawFiles.count
-        let urls        = rawFiles.map { $0.url }
+        // Capture (id, url) pairs so each result is applied to the right file even
+        // if the array is repopulated mid-analysis (forceRefresh / directory
+        // switch). Applying by stale positional index could hit the wrong file.
+        let targets     = rawFiles.map { (id: $0.id, url: $0.url) }
 
         // Batch size 3: Vision (VNGenerateForegroundInstanceMaskRequest) competes for the
         // Neural Engine. At batch 6, five tasks queue behind the first and each take ~950ms.
@@ -766,19 +778,41 @@ final class SDCardManager: ObservableObject {
         for batchStart in stride(from: 0, to: total, by: analysisBatchSize) {
             if analysisCancelled { break }
             let batchEnd = min(batchStart + analysisBatchSize, total)
+            let batch    = Array(targets[batchStart..<batchEnd])
 
-            await withTaskGroup(of: (Int, FocusResult).self) { group in
-                for i in batchStart..<batchEnd {
-                    let url = urls[i]
+            // ── Pass 1: load thumbnails SERIALLY, off the main actor ─────────
+            // Concurrent 2048px decodes contend on SD-card random I/O and hold
+            // several large buffers at once. One detached task decodes the batch
+            // in order; analysis then runs concurrently on the in-memory images.
+            let images: [CGImage?] = await Task.detached(priority: .userInitiated) {
+                batch.map { FocusAnalyzer.loadThumbnail(from: $0.url, maxDimension: 2048) }
+            }.value
+
+            // ── Pass 2: analyse the in-memory images concurrently ────────────
+            await withTaskGroup(of: (UUID, FocusResult).self) { group in
+                for (offset, target) in batch.enumerated() {
+                    let cgImage = images[offset]
                     group.addTask {
-                        let r = await FocusAnalyzer.analyze(url: url,
+                        let r: FocusResult
+                        if let cgImage {
+                            r = await FocusAnalyzer.analyze(cgImage: cgImage,
+                                                            url: target.url,
                                                             sharpThreshold: sharpT,
                                                             acceptableThreshold: acceptableT)
-                        return (i, r)
+                        } else {
+                            // Serial decode failed — the url overload retries the
+                            // load once and returns the unanalyzed sentinel if it
+                            // fails again, so the file is never silently skipped.
+                            r = await FocusAnalyzer.analyze(url: target.url,
+                                                            sharpThreshold: sharpT,
+                                                            acceptableThreshold: acceptableT)
+                        }
+                        return (target.id, r)
                     }
                 }
-                for await (i, result) in group {
-                    applyFocusResult(result, to: i)
+                for await (id, result) in group {
+                    guard let idx = index(for: id) else { continue }
+                    applyFocusResult(result, to: idx)
                 }
             }
             analysisProgress = Double(batchEnd) / Double(total)
@@ -792,10 +826,12 @@ final class SDCardManager: ObservableObject {
 
     func analyzeFocus(for file: RAWFile) async {
         guard let idx = index(for: file.id) else { return }
+        let sharpT      = settings?.sharpThreshold ?? 0.62
+        let acceptableT = min(settings?.acceptableThreshold ?? 0.32, sharpT - 0.01)
         let result = await FocusAnalyzer.analyze(
             url: file.url,
-            sharpThreshold:      settings?.sharpThreshold      ?? 0.62,
-            acceptableThreshold: settings?.acceptableThreshold ?? 0.32)
+            sharpThreshold:      sharpT,
+            acceptableThreshold: acceptableT)
         applyFocusResult(result, to: idx)
         rebuildAllGroups()
         runBurstSharpnessRanking()
@@ -825,15 +861,16 @@ final class SDCardManager: ObservableObject {
 
         // Species — from SpeciesDetector (classifier). Stored separately from
         // detectedAnimalLabel which tracks geometric subject detection.
+        // Note: detectionConfidence is deliberately NOT seeded from
+        // speciesConfidence — they measure different things (Vision geometric
+        // detection vs classifier), and conflating them made the diagnostic
+        // view's confidence row misleading and gated the Vision fallback label
+        // against classifier thresholds it was never meant to face.
         if let speciesLabel = result.speciesLabel {
             let normLabel = SDCardManager.normaliseSpeciesLabel(speciesLabel)
-            rawFiles[idx].speciesLabel        = normLabel
-            rawFiles[idx].speciesConfidence   = result.speciesConfidence
-            rawFiles[idx].speciesCandidates   = result.speciesCandidates
-            rawFiles[idx].detectionConfidence = result.speciesConfidence
-            print("✅ [applyFocusResult] idx=\(idx) speciesLabel set to \"\(normLabel)\" conf=\(result.speciesConfidence.map { String(format: "%.4f", $0) } ?? "nil")")
-        } else {
-            print("⚠️ [applyFocusResult] idx=\(idx) speciesLabel=nil (not set)")
+            rawFiles[idx].speciesLabel      = normLabel
+            rawFiles[idx].speciesConfidence = result.speciesConfidence
+            rawFiles[idx].speciesCandidates = result.speciesCandidates
         }
 
         // detectedAnimalLabel — only from routing-time subject detection (requires contour).
@@ -977,26 +1014,53 @@ final class SDCardManager: ObservableObject {
 
     func writeXMP(for file: RAWFile) {
         guard let idx = index(for: file.id) else { return }
+        // Resolve the species HERE so the sidecar keyword always matches what the
+        // UI shows. Previously the writer preferred speciesLabel unconditionally,
+        // so a below-band classifier guess could be written while the UI showed
+        // the Vision fallback.
+        guard let species = settings?.displaySpecies(for: file)?.label else {
+            errorMessage = XMPSidecarWriter.WriteError.noSpeciesLabel.localizedDescription
+            return
+        }
         do {
-            try XMPSidecarWriter.write(for: file)
+            try XMPSidecarWriter.write(for: file, species: species)
             rawFiles[idx].xmpWritten = true
         } catch { errorMessage = error.localizedDescription }
     }
 
-    func writeXMPBatch() -> String {
-        // Eligibility honours the per-size confidence band (same rule the UI uses
-        // to show a species). Files whose species doesn't clear its threshold are
-        // not written. writeBatch itself resolves speciesLabel ?? detectedAnimalLabel.
-        let eligible = rawFiles.filter { settings?.displaySpecies(for: $0) != nil }
-        let result   = XMPSidecarWriter.writeBatch(for: eligible)
-        for i in rawFiles.indices {
-            if settings?.displaySpecies(for: rawFiles[i]) != nil && !rawFiles[i].xmpWritten {
-                rawFiles[i].xmpWritten = XMPSidecarWriter.sidecarExists(for: rawFiles[i])
-            }
+    /// Writes XMP sidecars for every file whose species clears the per-size
+    /// confidence band. Runs the disk writes off the main actor and publishes
+    /// progress so the grid can show a banner. Returns a user-facing summary.
+    func writeXMPBatch() async -> String {
+        guard let settings else { return "Settings unavailable" }
+        // Eligibility + resolution in one pass: the resolved display label is
+        // handed to the writer, guaranteeing UI and sidecar always agree.
+        let eligible: [(file: RAWFile, species: String)] = rawFiles.compactMap { f in
+            settings.displaySpecies(for: f).map { (f, $0.label) }
         }
-        var summary = "\(result.written) XMP file(s) written"
-        if result.skipped > 0     { summary += ", \(result.skipped) skipped (no species)" }
-        if !result.errors.isEmpty { summary += ", \(result.errors.count) error(s)" }
+        guard !eligible.isEmpty else { return "No files with a confident species to write" }
+
+        isWritingXMP = true; xmpProgress = 0
+        var written = 0
+        var errors: [String] = []
+
+        for (i, item) in eligible.enumerated() {
+            let file = item.file, species = item.species
+            do {
+                _ = try await Task.detached(priority: .utility) {
+                    try XMPSidecarWriter.write(for: file, species: species)
+                }.value
+                written += 1
+                if let idx = index(for: file.id) { rawFiles[idx].xmpWritten = true }
+            } catch {
+                errors.append("\(file.name): \(error.localizedDescription)")
+            }
+            xmpProgress = Double(i + 1) / Double(eligible.count)
+        }
+
+        isWritingXMP = false
+        var summary = "\(written) XMP file(s) written"
+        if !errors.isEmpty { summary += ", \(errors.count) error(s)" }
         return summary
     }
 
@@ -1122,7 +1186,7 @@ final class SDCardManager: ObservableObject {
 
     // MARK: - Private helpers
 
-    private func collectRAWFiles(in directory: URL) -> [RAWFile] {
+    nonisolated private static func collectRAWFiles(in directory: URL) -> [RAWFile] {
         guard let enumerator = FileManager.default.enumerator(
             at: directory,
             includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey],
@@ -1134,7 +1198,7 @@ final class SDCardManager: ObservableObject {
             .map { RAWFile(url: $0) }
     }
 
-    private func scanForRAWFiles() -> [RAWFile] {
+    nonisolated private static func scanForRAWFiles() -> [RAWFile] {
         var results: [RAWFile] = []
         let volumesURL = URL(fileURLWithPath: "/Volumes", isDirectory: true)
         if let vols = try? FileManager.default.contentsOfDirectory(

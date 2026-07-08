@@ -33,9 +33,14 @@ enum XMPSidecarWriter {
 
     /// Writes an XMP sidecar for a single RAWFile.
     /// Returns the URL of the written sidecar on success.
+    ///
+    /// - Parameter species: The resolved display species from the caller
+    ///   (AppSettings.displaySpecies). Passing it guarantees the sidecar keyword
+    ///   matches what the UI shows — a below-threshold classifier guess is never
+    ///   written. When nil, falls back to speciesLabel ?? detectedAnimalLabel.
     @discardableResult
-    static func write(for file: RAWFile) throws -> URL {
-        guard let species = speciesKeyword(for: file), !species.isEmpty else {
+    static func write(for file: RAWFile, species overrideSpecies: String? = nil) throws -> URL {
+        guard let species = overrideSpecies ?? speciesKeyword(for: file), !species.isEmpty else {
             throw WriteError.noSpeciesLabel
         }
         let sidecarURL = sidecarURL(for: file.url)
@@ -48,34 +53,12 @@ enum XMPSidecarWriter {
         }
     }
 
-    /// Writes XMP sidecars for multiple files. Returns a summary of results.
-    static func writeBatch(for files: [RAWFile]) -> (written: Int, skipped: Int, errors: [String]) {
-        var written = 0
-        var skipped = 0
-        var errors: [String] = []
-
-        for file in files {
-            guard speciesKeyword(for: file) != nil else {
-                skipped += 1
-                continue
-            }
-            do {
-                try write(for: file)
-                written += 1
-            } catch {
-                errors.append("\(file.name): \(error.localizedDescription)")
-            }
-        }
-
-        return (written, skipped, errors)
-    }
-
     // MARK: - XMP construction
 
     private static func buildXMP(species: String, file: RAWFile) -> String {
         // Build hierarchical keyword: Wildlife|Birds|Robin
         // or Wildlife|Mammals|Red Fox depending on the class
-        let group         = groupLabel(for: file)
+        let group         = groupLabel(species: species, for: file)
         let hierarchical  = "Wildlife|\(group)|\(species)"
         let escaped        = xmlEscape(species)
         let escapedHier   = xmlEscape(hierarchical)
@@ -132,19 +115,19 @@ enum XMPSidecarWriter {
         FileManager.default.fileExists(atPath: sidecarURL(for: file.url).path)
     }
 
-    /// Maps the detected species to a human-readable group label.
-    private static func groupLabel(for file: RAWFile) -> String {
-        let name = speciesKeyword(for: file)?.lowercased()
+    /// Maps the written species name to a human-readable group label.
+    /// Uses the SAME species string as the keyword so the hierarchy is always
+    /// consistent with the flat keyword.
+    private static func groupLabel(species: String, for file: RAWFile) -> String {
+        let name = species.lowercased()
         switch file.focusRegion {
         case .animalEyes, .animalHead, .animalBody, .yoloEyes, .yoloHead, .yoloBody:
-            if let name, isBirdName(name) { return "Birds" }
-            return "Mammals"
+            return isBirdName(name) ? "Birds" : "Mammals"
         default:
             // Even without an animal scoring region, use the name to place birds
             // correctly (the classifier may identify a species the geometric
             // detector didn't localise).
-            if let name, isBirdName(name) { return "Birds" }
-            return "Wildlife"
+            return isBirdName(name) ? "Birds" : "Wildlife"
         }
     }
 
